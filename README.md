@@ -34,6 +34,7 @@ state + { route: choice[billing, technical, refund, other], urgent: noul, severi
 - [Features](#features)
 - [Results](#results)
 - [How it works](#how-it-works)
+- [Requirements](#requirements)
 - [Quickstart](#quickstart)
 - [API](#api)
 - [When to use something else](#when-to-use-something-else)
@@ -51,7 +52,7 @@ state + { route: choice[billing, technical, refund, other], urgent: noul, severi
 | Order invariance | Option order does not change the output. One pass, no permutation averaging. Unit-tested. |
 | Portable heads | A head trained on the 2B backbone moves to the 9B backbone with a closed-form ridge map. No gradient steps. |
 | Calibration | Trained with cross-entropy plus Brier. `POST /v1/calibrate` fits a per-question profile from your labels and picks the calibrator by cross-validation. |
-| `none` sink option | Every question has a learned `none` option. Its probability tells you when no listed option is supported. |
+| `none` option | Every question gets a "none of the above" option that the backbone reads like any other. Its probability tells you when no listed option is supported. |
 | Prefix cache | States are cached across requests at record boundaries. A state that grows (events, logs) only pays for the new records. |
 | Retrieval store | SQLite store with BM25 plus dense search. It builds a state from a large record collection under a token budget. |
 | Explanations | Optional `POST /v1/explain`. The same backbone writes a short explanation, cites the records that drove the decision, and scores its own faithfulness. |
@@ -86,13 +87,33 @@ own train split score higher (Verdict 2.0: 0.771, Laya: 0.766).
 
 <p align="center"><img src="docs/img/public_benchmarks.png" alt="public benchmark accuracy" width="760"></p>
 
-| | Banking77 (8-way) | Prompt injections | OpenBookQA | CommonsenseQA | PubMedQA |
+| | Banking77 (8-way) | Prompt-injection detection | OpenBookQA | CommonsenseQA | PubMedQA |
 |---|---|---|---|---|---|
 | OpenDecider 2B | 0.819 | 0.767 | 0.686 | 0.639 | 0.849 |
 | 2B→9B stitched | 0.856 | 0.595 | 0.838 | 0.764 | 0.837 |
 | Qwen3.5-9B zero-shot | 0.931 | 0.819 | 0.894 | 0.813 | 0.883 |
 | OpenDecider 2B + 9B profile | **0.956** | **0.931** | 0.890 | 0.800 | **0.887** |
 | Jev (third-party report) | 0.838 | 0.870 | 0.942 | 0.881 | – |
+
+All values are accuracy. Prompt-injection detection is a classification task
+([deepset/prompt-injections](https://huggingface.co/datasets/deepset/prompt-injections), 116 held-out texts): the
+model labels each text as an injection attempt or a normal request. 0.931 means 93.1% of those texts got the right
+label; the errors include both missed injections and false alarms. It does not measure whether the model itself
+resists injected instructions inside a state. That is a separate test and not done yet.
+
+### `none` option (2B backbone, no extra training)
+
+Held-out questions from the training families (clinc, massive, dbpedia, arc, snli), plus questions paired with an
+unrelated state. AUROC measures how well P(none) separates unanswerable from answerable questions.
+
+| Case | Mean P(none) | AUROC vs answerable |
+|---|---|---|
+| Answerable (correct option listed) | 0.097 | – |
+| Correct option removed | 0.430 | 0.845 |
+| State unrelated to the question | 0.151 | 0.795 |
+
+Accuracy on answerable questions is unchanged (0.892). A learned `none` vector with only its two parameters trained
+did worse (unrelated-state AUROC 0.537). See [`docs/roadmap_designs.md`](docs/roadmap_designs.md).
 
 ### Prefix cache (Jetson AGX Orin, 2B backbone)
 
@@ -110,10 +131,9 @@ A state grows by one record between two requests. The top answer matched the unc
 flowchart LR
   S[state] --> C["prefix cache<br/>(per-record chunks)"]
   C --> B["frozen Qwen3.5 backbone<br/>2B or 9B, int8"]
-  Q["questions + options"] --> B
+  Q["questions + options<br/>+ none of the above"] --> B
   B --> L["layer combine<br/>DepthAttn (2B) or ridge stitch (9B)"]
   L --> T["decision trunk<br/>one token per option, no positions"]
-  N["learned none token"] --> T
   T --> H["pointer head<br/>softmax over options + none"]
   H --> P["decision profile<br/>temperature, beta, isotonic, trees"]
   P --> O["probabilities"]
@@ -123,13 +143,31 @@ flowchart LR
    questions adds little latency.
 2. Options are tokens, not vocabulary. The head scores any option set the caller sends. Without slot embeddings the
    trunk is permutation-equivariant.
-3. The `none` token is a learned vector with no text. It competes with the real options in the same softmax.
+3. "none of the above" is added to every question as a normal option. It competes with the real options in the same
+   softmax. `probs` is renormalized over your options, and `none` is reported next to it.
 4. A decision profile maps raw probabilities to calibrated ones. It can also pool several sources (the trunk, the
    stitched 9B, the 9B's own letter scores).
 
 Design notes: [`docs/roadmap_designs.md`](docs/roadmap_designs.md),
 [`docs/branched_shared_prefix_math.md`](docs/branched_shared_prefix_math.md),
 [`docs/v3_dense_design.md`](docs/v3_dense_design.md).
+
+## Requirements
+
+| | Minimum | Tested |
+|---|---|---|
+| GPU memory, 2B backbone | 4 GB for states up to about 1k tokens, 5 GB up to 4k, 8 GB up to 15k (int8 weights: 1.9 GB) | Jetson AGX Orin 64 GB (inference), DGX Spark (training) |
+| GPU memory, 9B backbone | about 10 GB of int8 weights plus the same per-state cost (estimate, not measured) | Jetson AGX Orin 64 GB |
+| Host RAM | 12 GB peak while loading the 2B backbone | same |
+| Disk, 2B backbone | 4.3 GB weights + about 0.1 GB checkpoint | same |
+| Disk, 9B backbone (stitched) | about 18 GB bf16 weights + 0.23 GB checkpoint | same |
+| Disk, Python environment | about 6 GB (PyTorch, transformers) | same |
+| Python | 3.12 | 3.12 on aarch64 (JetPack) |
+| CPU only | Unit tests only (tiny random model) | – |
+
+Weights are loaded as int8, so GPU memory is lower than the bf16 download size. The prefix cache adds up to
+`OPENDECIDER_STATE_CACHE_MB` (default 2 GB). The code keeps at least 4 GB of disk
+free and refuses downloads that would go below that.
 
 ## Quickstart
 
@@ -169,8 +207,8 @@ curl -s localhost:8000/v1/decide -H 'content-type: application/json' -d '{
 | `POST /v1/explain` | Optional. Explanation, evidence spans and a faithfulness score for one question. |
 | `GET /healthz` | Health check. |
 
-Each answer has `value`, `probs`, `confidence`, and `std` (when `sampler.k > 1`). Models with the sink option also
-return `none`. Set `"none": false` on a question to hide it. Invalid requests return 400. Probabilities sum to 1
+Each answer has `value`, `probs`, `confidence`, and `std` (when `sampler.k > 1`). Each answer also has `none`, the
+probability that no listed option is supported. Set `"none": false` on a question to turn it off. Invalid requests return 400. Probabilities sum to 1
 within 1e-6.
 
 `method: "auto"` compares identity, shrunk temperature, beta, ETS, temperature plus per-option bias, histogram
@@ -183,6 +221,7 @@ Environment variables:
 |---|---|---|
 | `OPENDECIDER_CKPT` | – | Checkpoint to serve. |
 | `OPENDECIDER_STATE_CACHE_MB` | `2048` | Prefix cache size. `0` turns it off. |
+| `OPENDECIDER_NONE_TEXT` | `none of the above` | Text of the `none` option. Empty turns it off. |
 | `HOST`, `PORT` | `127.0.0.1`, `8000` | Bind address. |
 
 ## When to use something else
@@ -191,14 +230,13 @@ Environment variables:
 |---|---|
 | Under 20 ms per question on one fixed task, with labeled data | A fine-tuned encoder (Laya, Von, Verdict). |
 | A 27B+ model is already served and you only need the argmax | A letter-logit wrapper (open-alternative-jev, Featherless). |
-| The best zero-shot accuracy today | Decider 1 or Jev (proprietary), or a 27B LoRA model (Kev, Open-Jev). |
 
 A map of about 60 open and commercial alternatives is in [`docs/LANDSCAPE.md`](docs/LANDSCAPE.md).
 
 ## Limitations
 
 - Accuracy trails Jev and Decider 1 on typed-decisions.
-- The stitched 9B loses accuracy on prompt injections (0.595 vs 0.767 for the 2B).
+- The stitched 9B loses accuracy on prompt-injection detection (0.595 vs 0.767 for the 2B).
 - Tree profiles overfit below about 250 labels. Use `method: "auto"` and let cross-validation choose.
 - Latency is 0.3 to 1.9 s per request on the Orin for states up to about 4k tokens. The TensorRT path is not done.
 - There is no Jev API access. All Jev numbers come from TypeSafe or third parties.
@@ -207,7 +245,7 @@ A map of about 60 open and commercial alternatives is in [`docs/LANDSCAPE.md`](d
 
 - [x] Prefix cache across requests (exact, per-record chunks).
 - [x] Automatic calibrator selection in `/v1/calibrate`.
-- [x] `none` sink option (sink-only training done; full training pending).
+- [x] `none` option ("none of the above", no training needed).
 - [x] Retrieval store (BM25 + dense) and `/v1/explain`.
 - [ ] Warm-start 9B training from the stitched checkpoint.
 - [ ] Conformal prediction sets and abstention in the API.
@@ -231,8 +269,8 @@ bash scripts/stitch_eval.sh
 .venv/bin/python -m eval.tree_head --typed --sources runs/td-x2b runs/td-x9b-stitch runs/td-9b --name tree-typed
 .venv/bin/python -m eval.calib_curve --typed --no-trees --sources runs/td-x2b runs/td-x9b-stitch runs/td-9b
 
-# none sink, prefix cache, retrieval recall, explanations
-.venv/bin/python scripts/train_none.py --ckpt runs/x2b/model.pt --out runs/x2b-none/model.pt
+# none option (explicit text; the learned-vector variant trains with --out), prefix cache, recall, explanations
+.venv/bin/python scripts/train_none.py --ckpt runs/x2b/model.pt --explicit "none of the above"
 .venv/bin/python scripts/bench_state_cache.py --ckpt runs/x2b/model.pt
 .venv/bin/python -m eval.store_recall --embedder opendecider.embed:x2b_embedder
 .venv/bin/python -m eval.explain_eval --ckpt runs/x2b/model.pt

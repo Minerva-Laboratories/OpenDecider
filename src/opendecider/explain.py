@@ -101,6 +101,8 @@ class Explainer:
             self.m.__dict__["_E"] = E
         ids = torch.tensor([bb.tokenize([prompt])[0]] * n, device=dev)
         stop = {bb.tok.eos_token_id, *bb.tok.convert_tokens_to_ids(["<|im_end|>", "<|endoftext|>"])}
+        # no hidden-reasoning block: the answer is the explanation itself
+        ban = [t for t in bb.tok.convert_tokens_to_ids(["<think>", "</think>"]) if t is not None and t >= 0]
         g = torch.Generator(device=dev).manual_seed(seed)
         vera = getattr(self.m, "vera", None)
         prev = vera.active if vera is not None else None
@@ -112,6 +114,7 @@ class Explainer:
             done = torch.zeros(n, dtype=torch.bool, device=dev)
             for _ in range(max_new):
                 logits = (h[:, -1].to(torch.bfloat16) @ E.t()).float()
+                logits[:, ban] = -float("inf")
                 if temperature > 0:
                     nxt = torch.multinomial(torch.softmax(logits / temperature, -1), 1, generator=g).squeeze(1)
                 else:
@@ -127,7 +130,7 @@ class Explainer:
             if vera is not None:
                 vera.active = prev
         texts = bb.tok.batch_decode(out.tolist(), skip_special_tokens=True)
-        return [t.split("\n\n")[0].strip() for t in texts]
+        return [t.strip().split("\n\n")[0].strip() for t in texts]      # first paragraph (leading blank lines skipped)
 
     # ------------------------------------------------------------------ end to end
     def explain(self, state, q: Question, names=None, n_samples: int = 1, temperature: float = 0.7,

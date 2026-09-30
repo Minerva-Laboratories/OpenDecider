@@ -6,6 +6,7 @@ batched decision call; >255-option Choice questions use the two-stage path (O2).
 from __future__ import annotations
 
 import contextlib
+import copy
 import json
 import math
 import os
@@ -36,6 +37,9 @@ class Decider:
         self.temperature_by_type = temperature_by_type or {}
         self.profiles_dir = profiles_dir
         self._profiles: dict = {}
+        # explicit `none` option: appended as TEXT to every question, so the backbone reads it in context like any
+        # other option (no training). "" turns it off; models with the learned sink (v3_none) use that instead.
+        self.none_text = os.environ.get("OPENDECIDER_NONE_TEXT", "none of the above")
 
     def profile(self, pid: str | None):
         if not pid:
@@ -124,9 +128,25 @@ class Decider:
             T = torch.tensor(Ts, device=out.logits.device, dtype=out.logits.dtype)[:, None]
             logits = out.logits / T + biases
             p = torch.softmax(logits, -1) * out.opt_mask
-            for pid, rows in groups.items():
-                r = torch.tensor(rows, device=p.device)
-                p[r] = calibrate_rows(self._profiles[pid]["calibrator"], p[r], out.logits[r], out.opt_mask[r])
+            if groups:
+                # profiles are fitted on the real options only: set the explicit `none` column aside, calibrate the
+                # renormalised real options, then put P(none) back
+                col = torch.tensor([getattr(q, "none_col", -1) for q in questions], device=p.device)
+                has = col >= 0
+                rows_n = has.nonzero().squeeze(1)
+                pn = torch.zeros(len(questions), device=p.device, dtype=p.dtype)
+                mask = out.opt_mask.clone()
+                if len(rows_n):
+                    pn[rows_n] = p[rows_n, col[rows_n]]
+                    p[rows_n, col[rows_n]] = 0
+                    mask[rows_n, col[rows_n]] = False
+                    p[rows_n] = p[rows_n] / p[rows_n].sum(1, keepdim=True).clamp_min(1e-12)
+                for pid, rows in groups.items():
+                    r = torch.tensor(rows, device=p.device)
+                    p[r] = calibrate_rows(self._profiles[pid]["calibrator"], p[r], out.logits[r], mask[r])
+                if len(rows_n):
+                    p[rows_n] = p[rows_n] * (1 - pn[rows_n])[:, None]
+                    p[rows_n, col[rows_n]] = pn[rows_n]
             if m.cfg.noul_mode == "sigmoid" and out.noul_logit is not None:
                 for i, q in enumerate(questions):
                     if q.type == "noul":
@@ -146,6 +166,15 @@ class Decider:
             scores.append(out.relevance[0, : len(chunk.options)])
         return torch.cat(scores)
 
+    def _with_none(self, q: Question) -> Question:
+        """Copy of q with the explicit `none` option appended (skipped when opted out or at the 255-option cap)."""
+        if getattr(q, "none", None) is False or len(q.options) >= MAX_OPTIONS:
+            return q
+        q2 = copy.copy(q)
+        q2.options = list(q.options) + [self.none_text]
+        q2.none_col = len(q.options)
+        return q2
+
     def _answer_batch(self, qs: list[Question], mem, sampler) -> tuple[dict, int]:
         """Answer isolated questions in one batch (<=255 options) plus the two-stage path (>255)."""
         small = [q for q in qs if len(q.options) <= MAX_OPTIONS]
@@ -158,10 +187,12 @@ class Decider:
             small.append(sub)
             n_tok += sum(len(t) for t in self.model.backbone.tokenize([q.prompt] + q.options))
         if small:
+            sink = getattr(self.model.cfg, "v3_none", False)            # learned sink = last column
+            if self.none_text and not sink:                             # explicit text option, after the real ones
+                small = [self._with_none(q) for q in small]
             mean, std = self._probs(small, mem, sampler)
-            sink = getattr(self.model.cfg, "v3_none", False)            # `none` sink = last column
             for i, q in enumerate(small):
-                K = len(q.options)
+                K = getattr(q, "none_col", len(q.options))
                 probs = _normalize(mean[i, :K])                      # renormalised over the caller's options
                 sd = std[i, :K].double().tolist()
                 names = getattr(q, "names", None) or q.options
@@ -172,8 +203,8 @@ class Decider:
                      "probs": dict(zip(names, probs)), "std": dict(zip(names, sd)),
                      # ordered list: keeps duplicate option strings distinguishable (probe battery)
                      "probs_list": probs}
-                if sink and getattr(q, "none", None) is not False:
-                    p_none = float(mean[i, -1])
+                if (sink and getattr(q, "none", None) is not False) or hasattr(q, "none_col"):
+                    p_none = float(mean[i, q.none_col] if hasattr(q, "none_col") else mean[i, -1])
                     a["none"] = p_none                               # P(no listed option is supported)
                     if p_none > float(mean[i, :K].max()):
                         a["value"] = "none"

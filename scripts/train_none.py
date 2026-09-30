@@ -28,13 +28,13 @@ from opendecider.models import ModelConfig, build_model
 FAMS = ("clinc", "massive", "dbpedia", "arc", "arc_challenge", "snli")
 
 
-def load(ckpt):
+def load(ckpt, sink=True):
     ck = torch.load(ckpt, map_location="cpu", weights_only=False)
     bb = Backbone.load(BackboneConfig(**ck["backbone_cfg"]))
-    cfg = ModelConfig(**{**ck["model_cfg"], "v3_none": True})
+    cfg = ModelConfig(**{**ck["model_cfg"], "v3_none": sink})
     m = build_model(bb, cfg)
     missing, unexpected = m.load_state_dict(ck["state_dict"], strict=False)
-    assert not unexpected and {k for k in missing if not k.startswith("backbone.")} == {"none_x", "none_lp"}, missing
+    assert not unexpected and {k for k in missing if not k.startswith("backbone.")} <= {"none_x", "none_lp"}, missing
     return m.to(bb.device).eval(), ck
 
 
@@ -64,10 +64,21 @@ def unknowable(path, n, rng):
             for r in recs[:n]]
 
 
+EXPLICIT = ""                       # --explicit: append this text as a real option instead of the learned sink
+
+
 def forward(m, batch):
     mem = m.encode_states([b[0] for b in batch])
-    qs = [Question(b[1], b[2], "choice", state_idx=i) for i, b in enumerate(batch)]
+    qs = [Question(b[1], b[2] + ([EXPLICIT] if EXPLICIT else []), "choice", state_idx=i) for i, b in enumerate(batch)]
     _, out = m.run(qs, mem)
+    if EXPLICIT:                       # the explicit option sits right after each question's own options
+        K = torch.tensor([len(b[2]) for b in batch], device=out.logits.device)
+        p = torch.softmax(out.logits.float(), -1)
+        pn = p.gather(1, K[:, None]).squeeze(1)
+        rest = p.clone(); rest.scatter_(1, K[:, None], 0.0)
+        logits = torch.log(torch.cat([rest[:, :-1] if rest.shape[1] > 1 else rest, pn[:, None]], 1).clamp_min(1e-12))
+        tgt = torch.tensor([b[3] if b[3] >= 0 else logits.shape[1] - 1 for b in batch], device=logits.device)
+        return logits, tgt
     none_col = out.logits.shape[1] - 1
     tgt = torch.tensor([b[3] if b[3] >= 0 else none_col for b in batch], device=out.logits.device)
     return out.logits, tgt
@@ -107,7 +118,10 @@ def main():
     ap.add_argument("--bs", type=int, default=16)
     ap.add_argument("--lr", type=float, default=3e-2)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--explicit", default="", help='eval only: append this option text (e.g. "none of the above")')
     a = ap.parse_args()
+    global EXPLICIT
+    EXPLICIT = a.explicit
     require_free_gb(0.5)
     limit_gpu_memory(float(os.environ.get("OPENDECIDER_EVAL_GPU_GB", "24")))
     rng = random.Random(a.seed); torch.manual_seed(a.seed)
@@ -115,6 +129,14 @@ def main():
     val = items("data/public_train/val.jsonl", 300, random.Random(1)) + \
         unknowable("data/synthetic/uncertainty_train.jsonl", 3000, random.Random(2))[-150:]
     rng.shuffle(train)
+    if a.explicit:                                   # zero-training baseline: a real text option read by the backbone
+        with gpu_lock("eval_none_explicit"):
+            m, _ = load(a.ckpt, sink=False)
+            res = evaluate(m, val, a.bs)
+        print("explicit", json.dumps(res), flush=True)
+        os.makedirs("runs/none-explicit", exist_ok=True)
+        json.dump({"explicit": a.explicit, "eval": res}, open("runs/none-explicit/none_eval.json", "w"), indent=1)
+        return
     with gpu_lock("train_none"):
         m, ck = load(a.ckpt)
         for n, p in m.named_parameters():

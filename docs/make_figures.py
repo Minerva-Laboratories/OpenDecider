@@ -37,7 +37,7 @@ ax.grid(axis="y", visible=False)
 fig.savefig("docs/img/typed_decisions.png"); plt.close(fig)
 
 # ---- public benchmarks
-B = [("banking77_8way", "Banking77\n8 intents"), ("prompt_injections", "Prompt\ninjections"), ("openbookqa", "OpenBookQA"),
+B = [("banking77_8way", "Banking77\n8 intents"), ("prompt_injections", "Prompt-injection\ndetection"), ("openbookqa", "OpenBookQA"),
      ("commonsenseqa", "Commonsense\nQA"), ("pubmedqa", "PubMedQA")]
 S = [("preds-x2b", "OpenDecider 2B", BLUE), ("public-x9b-stitch", "2B→9B stitched (no training)", AQUA),
      ("zs-9b", "Qwen3.5-9B zero-shot", YELLOW)]

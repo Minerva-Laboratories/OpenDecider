@@ -81,7 +81,9 @@ def test_calibrate_rows_matches_numpy():
 
 @pytest.fixture(scope="module")
 def dec(bb, tmp_path_factory):
-    return Decider(make(bb, "v1"), profiles_dir=str(tmp_path_factory.mktemp("profiles")))
+    d = Decider(make(bb, "v1"), profiles_dir=str(tmp_path_factory.mktemp("profiles")))
+    d.none_text = ""          # exact comparisons against raw logits: no explicit `none` option (options interact)
+    return d
 
 
 QSPEC = {"type": "choice", "prompt": "Which team?", "options": ["billing", "tech", "other"]}

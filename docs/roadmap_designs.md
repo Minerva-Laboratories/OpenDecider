@@ -7,7 +7,7 @@ training data it needs, the deciding experiment and the current status.
 
 | Item | Code | Status |
 |---|---|---|
-| 1. Sink option (`none`) | `src/opendecider/v3.py` (`v3_none`), `scripts/train_none.py`, `tests/test_none_sink.py` | Implemented. Sink-only training is running; results pending. |
+| 1. `none` option | `src/opendecider/decider.py` (explicit text option, default), `src/opendecider/v3.py` (`v3_none`, learned vector), `scripts/train_none.py`, `tests/test_none_sink.py` | Implemented. The explicit text option is the default; results below. |
 | 2. Few-label recalibration | `src/opendecider/calibrators.py`, `src/opendecider/calibration.py`, `eval/calib_curve.py` | Implemented. `method: "auto"` is the default in `/v1/calibrate`. |
 | 3. State reuse, Tier 1 (prefix cache) | `src/opendecider/chunking.py`, `src/opendecider/state_cache.py`, `scripts/bench_state_cache.py` | Implemented and used by `Decider._encode_state`. Benchmark below. |
 | 3. State reuse, Tier 2 (store) | `src/opendecider/store.py`, `src/opendecider/embed.py`, `eval/store_recall.py` | Library and recall evaluation implemented. Not yet wired into `/v1/decide`. |
@@ -26,7 +26,17 @@ Jev and most reproductions have no native way to say "no listed option fits" or 
 
 ### Design
 
-- Every Choice, Score and Noul question gets one extra option, `none`.
+Two variants were built. The explicit text option is the default because it works without training (results below).
+
+Explicit text option (default, `Decider`):
+- Every Choice, Score and Noul question gets one extra option with the text `none of the above`
+  (`OPENDECIDER_NONE_TEXT`; empty turns it off).
+- The backbone reads it in context like any other option. The trunk scores it in the same softmax.
+- Calibration profiles are fitted on the real options. At inference the `none` column is set aside, the real options
+  are calibrated, and P(none) is put back.
+- Options interact in the trunk, so adding the option changes the real-option probabilities slightly.
+
+Learned vector (`v3_none`, experimental):
 - `none` has no text. Its representation is a learned vector.
   - The V3 trunk receives options as token-embedding spans (`v3_option_repr="embed"`). `none` is a length-1 span.
     Its feature is a trainable parameter (`none_x`).
@@ -37,10 +47,10 @@ Jev and most reproductions have no native way to say "no listed option fits" or 
   attention with no useful target.
 
 API (implemented in `Decider`):
-- On models trained with `v3_none`, each answer reports `"none": P(none)`.
+- Each answer reports `"none": P(none)` (explicit option, or the learned vector on `v3_none` models).
 - `probs` are renormalized over the caller's options.
 - `value` is `"none"` when P(none) exceeds every listed option.
-- `"none": false` on a question turns the sink off. Use it for closed-world questions where an option always fits.
+- `"none": false` on a question turns it off. Use it for closed-world questions where an option always fits.
 
 Planned interactions with other components:
 - Conformal sets (roadmap §5.2) may contain `none`.
@@ -79,7 +89,24 @@ random distractors.
 - Hard-negative recall, compared with Verdict's 18%.
 - Permutation TV stays 0.000.
 
-Results pending (training of the sink-only parameters is running).
+### Results
+
+2B checkpoint (`runs/x2b`), held-out val questions from clinc, massive, dbpedia, arc, arc_challenge and snli
+(questions with more than 16 options keep the gold option plus 15 random distractors), plus 150 held-out unrelated-state
+questions. Mean P(none) per case and AUROC of P(none) against answerable questions:
+
+| Variant | Training | P(none) answerable | P(none) gold removed | P(none) unrelated state | AUROC gold removed | AUROC unrelated state | Accuracy (answerable) |
+|---|---|---|---|---|---|---|---|
+| Learned vector, random init | none | 0.318 | 0.697 | 0.349 | 0.834 | 0.576 | 0.892 |
+| Learned vector, 2 parameters trained (300 steps) | sink only | 0.295 | 0.684 | 0.284 | 0.839 | 0.537 | 0.892 |
+| Explicit text `none of the above` | none | 0.097 | 0.430 | 0.151 | 0.845 | 0.795 | 0.892 |
+
+- The explicit option is better on every measure and needs no training. The backbone already understands the phrase.
+- Training only the learned vector does not help. A useful learned sink needs the trunk trained with `none` targets.
+- Even a random sink separates "gold removed" well (AUROC 0.83): when the right option is missing, the others score
+  lower, so any extra option gains mass.
+
+Sources: `runs/none-explicit/none_eval.json`, `runs/x2b-none/none_eval.json`, `runs/train_none.log`.
 
 ---
 
@@ -274,7 +301,22 @@ Reading:
 - Example CI: BM25 at 100,000 chunks and 8192 tokens is 0.667 [0.511, 0.800].
 - Selection p50 at 100,000 chunks: 156–167 ms for BM25, 205–240 ms for hybrid. Index build: 0.62 s for 10,000
   chunks, 6.65 s for 100,000.
-- Recall with `BackboneEmbedder` (`--embedder opendecider.embed:x2b_embedder`) is pending.
+- With real embeddings from the 2B backbone (`--embedder opendecider.embed:x2b_embedder`, mean-pooled middle layer),
+  union by max, 45 trials:
+
+  | Records | Budget | BM25 | Dense | Hybrid |
+  |---|---|---|---|---|
+  | 1,000 | 512 | 0.733 [0.600, 0.844] | 0.244 | 0.356 |
+  | 1,000 | 2048 | 1.000 | 0.467 | 0.467 |
+  | 1,000 | 8192 | 1.000 | 0.600 | 1.000 |
+  | 10,000 | 512 | 0.667 [0.511, 0.800] | 0.222 | 0.267 |
+  | 10,000 | 2048 | 0.667 | 0.311 | 0.711 [0.578, 0.844] |
+  | 10,000 | 8192 | 0.867 [0.756, 0.956] | 0.333 | 0.844 |
+
+  Mean-pooled backbone states are a weak retriever. Dense search finds none of the `by_id` records, but it helps on
+  paraphrased questions (`by_event` at 10,000 records and 2048 tokens: dense 0.53, BM25 0.00). At small budgets it
+  dilutes the fused list. BM25 stays the default; a dedicated embedding model is future work. Dense search with the
+  backbone embedder costs about 180–230 ms p50 per selection. Source: `runs/store-recall/`.
 
 Still to measure: accuracy vs budget, and p50 latency on the Orin for cold, Tier 1 hit, append and Tier 2.
 
