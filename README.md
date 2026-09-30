@@ -127,14 +127,15 @@ detection (116).
 
 | Weights / cache | Weight memory | Peak GPU memory, 0.8k / 3.7k / 15k-token state | Latency, same states | Stored state, 15k tokens | typed-decisions | Banking77 | Injection detection |
 |---|---|---|---|---|---|---|---|
-| int8 / int8 (default) | 1.88 GB | 2.4 / 2.6 / 3.4 GB | 0.85 / 1.62 / 5.16 s | 106 MB | 0.442 | 0.819 | 0.776 |
-| int8 / int4 | 1.88 GB | 2.4 / 2.6 / 3.4 GB | 0.86 / 1.63 / 5.18 s | 67 MB | – | – | – |
-| NF4 / int8 | 1.26 GB | 1.8 / 2.0 / 2.8 GB | 0.68 / 1.46 / 5.00 s | 106 MB | – | – | – |
-| NF4 / int4 | 1.26 GB | 1.8 / 2.0 / 2.8 GB | 0.68 / 1.47 / 4.98 s | 67 MB | 0.408 | 0.781 | 0.698 |
+| int8 / int8 (default) | 1.88 GB | 2.4 / 2.5 / 3.1 GB | 0.86 / 1.58 / 4.92 s | 106 MB | 0.434 | 0.825 | 0.776 |
+| int8 / int4 | 1.88 GB | 2.4 / 2.5 / 3.1 GB | 0.81 / 1.47 / 4.60 s | 67 MB | 0.446 | 0.819 | 0.767 |
+| NF4 / int8 | 1.26 GB | 1.8 / 1.8 / 2.5 GB | 0.64 / 1.33 / 4.43 s | 106 MB | 0.404 | 0.756 | 0.707 |
+| NF4 / int4 | 1.26 GB | 1.8 / 1.8 / 2.5 GB | 0.64 / 1.29 / 4.38 s | 67 MB | 0.410 | 0.781 | 0.698 |
 
-- Option rows attend to one shared copy of the state's K/V (shared-prefix attention) instead of each row getting
-  its own full-precision copy. Before this, peak memory at 15k tokens was 7.7 GB (int8) and 7.0 GB (NF4 / int4).
-- A 4-bit cache is safe (the earlier run gave 0.444 / 0.812 / 0.767 for int8 / int4). The stored state is small
+- Option rows attend to one shared copy of the state's K/V through fused SDPA (memory-efficient kernel, scores never
+  materialized) instead of each row getting its own full-precision copy. Before this, peak memory at 15k tokens was
+  7.7 GB (int8) and 7.0 GB (NF4 / int4).
+- A 4-bit cache is safe: accuracy stays within noise. The stored state is small
   either way because the backbone has only 6 attention layers with 2 KV heads; the fixed-size GDN recurrent state
   stays bf16.
 - 4-bit weights (NF4) save 0.6 GB and about 20% latency on short states, but cost 4 to 8 points on the public sets.
@@ -196,7 +197,7 @@ Design notes: [`docs/roadmap_designs.md`](docs/roadmap_designs.md),
 
 | | Minimum | Tested |
 |---|---|---|
-| GPU memory, 2B backbone | 2.5 GB for states up to about 1k tokens, 2.7 GB up to 4k, 3.5 GB up to 15k (int8 weights: 1.9 GB). With 4-bit weights and cache: 1.8 / 2.0 / 2.8 GB | Jetson AGX Orin 64 GB (inference), DGX Spark (training) |
+| GPU memory, 2B backbone | 2.4 GB for states up to about 1k tokens, 2.5 GB up to 4k, 3.1 GB up to 15k (int8 weights: 1.9 GB). With 4-bit weights and cache: 1.8 / 1.8 / 2.5 GB | Jetson AGX Orin 64 GB (inference), DGX Spark (training) |
 | GPU memory, 9B backbone | about 10 GB of int8 weights plus the same per-state cost (estimate, not measured) | Jetson AGX Orin 64 GB |
 | Host RAM | 12 GB peak while loading the 2B backbone | same |
 | Disk, 2B backbone | 4.3 GB weights + about 0.1 GB checkpoint | same |
@@ -273,7 +274,7 @@ Environment variables:
 - The stitched 9B loses accuracy on prompt-injection detection (0.595 vs 0.767 for the 2B).
 - 4-bit weights (NF4) cost 4 to 8 points on the public sets because the head was trained on int8 features.
 - Tree profiles overfit below about 250 labels. Use `method: "auto"` and let cross-validation choose.
-- Latency is 0.8 to 1.6 s per request on the Orin for states up to about 4k tokens, and about 5 s at 15k. The target
+- Latency is 0.8 to 1.6 s per request on the Orin for states up to about 4k tokens, and 4.4 to 4.9 s at 15k. The target
   (p50 < 150 ms) needs CUDA graphs and TensorRT, which are not done.
 - Explanations take about 16 s each on the Orin (eager decoding) and can contain small factual slips.
 - The prefix cache matches the uncached path to within 0.007 to 0.026 in probability (int8 cache boundaries), not
@@ -290,7 +291,6 @@ Everything below is either running or planned. Results will be added here and in
 |---|---|
 | 9B backbone: memory, latency, quantization, prefix cache, `none` option, explanations | Planned. The 9B has only the zero-shot stitched evaluations (typed-decisions and the public sets). |
 | 9B training (warm start from the stitched head) | Planned, on a separate training machine. |
-| Quantization accuracy for int8 / int4 and NF4 / int8 | Running. |
 | GPUs other than the Jetson AGX Orin (desktop and data-center cards, DGX Spark inference) | Planned. All memory and latency numbers are from one Orin 64 GB. |
 | GPU tests in CI | Planned. Unit tests run on CPU with a tiny random model; one GPU test covers the fused attention path. |
 | Confidence intervals for the quantization and explanation tables | Planned. Those tables use single runs on subsets (500 + 276 questions, 24 cases). |

@@ -425,3 +425,22 @@ Fresh process per config (`runs/quant/mem3_*.json`, `runs/quant/acc3.json`):
 
 Peak memory at 14,752 tokens fell from 7.681 to 3.415 GB (int8 / int8) and from 7.022 to 2.757 GB (NF4 / int4).
 Accuracy is unchanged within noise (typed-decisions accuracy moved by near-ties; KL and Brier are equal).
+
+### 9.2 Final: fused SDPA shared-prefix attention, all configs with accuracy
+
+Shared-prefix attention now runs on fused SDPA (memory-efficient kernel only on CUDA; the math kernel is disallowed,
+so scores are never materialized). One fresh process per config, memory, latency and accuracy in the same run
+(`runs/quant/final_*.json`). The GPU test `tests/test_v3.py::test_shared_prefix_fused_kernel_on_gpu` passes.
+
+| Weights / cache | Weights (GB) | Peak GB at 838 / 3,744 / 14,752 tokens | Latency s, same states | Stored state (MB) | typed acc | typed KL | typed Brier | Banking77 8-way | Injection detection |
+|---|---|---|---|---|---|---|---|---|---|
+| int8 / int8 | 1.877 | 2.393 / 2.462 / 3.091 | 0.859 / 1.577 / 4.919 | 105.6 | 0.434 | 0.354 | 0.191 | 0.825 | 0.776 |
+| int8 / int4 | 1.877 | 2.393 / 2.452 / 3.091 | 0.805 / 1.465 / 4.596 | 67.3 | 0.446 | 0.346 | 0.187 | 0.819 | 0.767 |
+| NF4 / int8 | 1.258 | 1.774 / 1.841 / 2.470 | 0.638 / 1.325 / 4.431 | 105.6 | 0.404 | 0.376 | 0.208 | 0.756 | 0.707 |
+| NF4 / int4 | 1.258 | 1.772 / 1.831 / 2.470 | 0.637 / 1.287 / 4.384 | 67.3 | 0.410 | 0.363 | 0.202 | 0.781 | 0.698 |
+
+- The int4 cache keeps accuracy within noise of int8 on all three sets.
+- NF4 weights cost 5 to 8 points on the public sets and about 0.03 on typed-decisions, and save 0.6 GB and 15 to
+  25% latency.
+- On the GPU the fused path matches the per-row-copy path to within 0.004 to 0.008 in probability (bf16 kernel
+  rounding).
