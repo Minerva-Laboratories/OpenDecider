@@ -7,7 +7,7 @@ and plug W into a V3 with v3_layer_combine="stitch". Everything downstream of th
 
     python scripts/stitch_backbone.py targets --ckpt runs/x2b/model.pt --out /dev/shm/stitch/targets.pt --n-states 300
     python scripts/stitch_backbone.py fit --ckpt runs/x2b/model.pt --targets /dev/shm/stitch/targets.pt \
-        --backbone-path /dev/shm/qwen35-9b --layers 8,16,24,final --out runs/x9b-stitch/model.pt
+        --backbone-path models/qwen3.5-9b-gguf/Qwen3.5-9B-Q4_0.gguf --layers 8,16,24,final --out runs/x9b-stitch/model.pt
 """
 from __future__ import annotations
 
@@ -99,7 +99,7 @@ def cmd_fit(a):
     T = torch.load(a.targets, weights_only=False)
     layers = [int(x) if x.isdigit() else x for x in a.layers.split(",")]
     bcfg = BackboneConfig(**{**ck["backbone_cfg"], "path": a.backbone_path, "feature_layers": layers,
-                             "weight_quant": "int8"})
+                             "weight_quant": "int8", "repo_id": a.repo_id, "revision": a.revision})
     bb = Backbone.load(bcfg)
     mcfg = dict(ck["model_cfg"])
     d_a = ck["state_dict"]["proj_option.weight"].shape[1]
@@ -159,6 +159,8 @@ def main():
     f = sub.add_parser("fit"); f.add_argument("--ckpt", required=True); f.add_argument("--targets", required=True)
     f.add_argument("--backbone-path", required=True); f.add_argument("--layers", default="8,16,24,final")
     f.add_argument("--out", required=True)
+    f.add_argument("--repo-id", default="Qwen/Qwen3.5-9B")            # provenance of the target backbone
+    f.add_argument("--revision", default="c202236235762e1c871ad0ccb60c8ee5ba337b9a")
     a = ap.parse_args()
     {"targets": cmd_targets, "fit": cmd_fit}[a.cmd](a)
 

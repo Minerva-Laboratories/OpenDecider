@@ -286,6 +286,9 @@ Environment variables:
 - The prefix cache matches the uncached path to within 0.007 to 0.026 in probability (int8 cache boundaries), not
   bit-exactly.
 - Dense retrieval uses mean-pooled backbone states, which is a weak retriever. BM25 is the default.
+- The published 2B→9B stitched numbers are superseded. The 9B has an untied LM head, and those runs computed the
+  option log-prob feature with the input embeddings instead. The loader now keeps the real head, and a re-evaluation
+  on the 9B GGUF weights is running (`scripts/eval_9b.sh`).
 - There is no Jev API access. All Jev numbers come from TypeSafe or third parties.
 - Checkpoints are not published yet.
 
@@ -295,7 +298,7 @@ Everything below is either running or planned. Results will be added here and in
 
 | Area | Status |
 |---|---|
-| 9B backbone: memory, latency, quantization, prefix cache, `none` option, explanations | Planned. The 9B has only the zero-shot stitched evaluations (typed-decisions and the public sets). |
+| 9B backbone: re-evaluation, memory, latency, `none` option, explanations | Running on the GGUF weights (`scripts/eval_9b.sh`). |
 | 9B training (warm start from the stitched head) | Planned, on a separate training machine. |
 | GPUs other than the Jetson AGX Orin (desktop and data-center cards, DGX Spark inference) | Planned. All memory and latency numbers are from one Orin 64 GB. |
 | GPU tests in CI | Planned. Unit tests run on CPU with a tiny random model; one GPU test covers the fused attention path. |

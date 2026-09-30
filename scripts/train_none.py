@@ -119,6 +119,7 @@ def main():
     ap.add_argument("--lr", type=float, default=3e-2)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--explicit", default="", help='eval only: append this option text (e.g. "none of the above")')
+    ap.add_argument("--eval-out", default="runs/none-explicit/none_eval.json")
     a = ap.parse_args()
     global EXPLICIT
     EXPLICIT = a.explicit
@@ -134,8 +135,8 @@ def main():
             m, _ = load(a.ckpt, sink=False)
             res = evaluate(m, val, a.bs)
         print("explicit", json.dumps(res), flush=True)
-        os.makedirs("runs/none-explicit", exist_ok=True)
-        json.dump({"explicit": a.explicit, "eval": res}, open("runs/none-explicit/none_eval.json", "w"), indent=1)
+        os.makedirs(os.path.dirname(a.eval_out), exist_ok=True)
+        json.dump({"explicit": a.explicit, "ckpt": a.ckpt, "eval": res}, open(a.eval_out, "w"), indent=1)
         return
     with gpu_lock("train_none"):
         m, ck = load(a.ckpt)

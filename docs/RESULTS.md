@@ -1,5 +1,9 @@
 # OpenDecider: detailed results
 
+> Note (2026-09-30): the 2B→9B stitched rows below were computed with the input embeddings standing in for the 9B's
+> untied LM head in the option log-prob feature. They are kept for the record and will be replaced by the
+> re-evaluation on the 9B GGUF weights (`scripts/eval_9b.sh`).
+
 ## Conventions
 
 - Sources: `runs/*/eval_*.json`, `runs/*/ensemble_cv.json` and `runs/tree-*/tree_head.json`. The run directories
