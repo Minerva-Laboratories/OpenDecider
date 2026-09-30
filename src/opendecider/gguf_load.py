@@ -95,7 +95,7 @@ def _convert(name: str, x: torch.Tensor, shape, c) -> torch.Tensor:
 
 @torch.no_grad()
 def load_qwen35_gguf(gguf_path: str, config_dir: str, device: str = "cuda", dtype=torch.bfloat16,
-                     weight_quant: str = "int8") -> nn.Module:
+                     weight_quant: str = "int8", awq_params: dict | None = None) -> nn.Module:
     """(text model: embed_tokens, layers, norm; untied LM head or None) from a GGUF file."""
     import gguf
     from transformers import AutoConfig
@@ -125,6 +125,10 @@ def load_qwen35_gguf(gguf_path: str, config_dir: str, device: str = "cuda", dtyp
             quantize_int8_(layer)
         elif weight_quant in ("w4", "w8"):
             gemlite_quantize_(layer, 4 if weight_quant == "w4" else 8)
+        elif weight_quant == "awq4":
+            from .awq import apply_awq_
+            pre = f"{i}."
+            apply_awq_(layer, {k[len(pre):]: v for k, v in awq_params.items() if k.startswith(pre)})
         torch.cuda.empty_cache()
     fill(lm.norm, "norm.")
     # non-persistent buffers (rotary inv_freq) are recomputed from the config

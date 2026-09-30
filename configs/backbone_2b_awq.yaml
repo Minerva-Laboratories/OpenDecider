@@ -1,0 +1,11 @@
+# Qwen3.5-2B, AWQ int4 (group 32, symmetric) from cyankiwi/Qwen3.5-2B-AWQ-4bit@718fd9b52c (llm-compressor
+# compressed-tensors). Runs on GemLite A16W4 Triton kernels with the checkpoint's own codes and scales.
+path: models/qwen3.5-2b-awq
+repo_id: cyankiwi/Qwen3.5-2B-AWQ-4bit
+revision: 718fd9b52c
+dtype: bfloat16
+weight_quant: awq
+kv_quant: int8
+quantize_linear_state: false
+feature_layers: [4, 8, 12, 16, 20, final]
+device: cuda

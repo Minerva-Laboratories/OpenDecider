@@ -2,7 +2,8 @@
 
     .venv/bin/python scripts/bench_quant.py --ckpt runs/x2b/model.pt [--configs int8:int8 nf4:int4] [--cases 100]
 
-Each config is "weights:cache[:graphs]": weights int8 | nf4 (bitsandbytes) | w8 | w4 (GemLite Triton GEMMs), cache
+Each config is "weights:cache[:graphs]": weights int8 | nf4 (bitsandbytes) | w8 | w4 (GemLite Triton GEMMs, round to
+nearest) | awq (pre-quantized AWQ checkpoint on GemLite int4 kernels, configs/*_awq.yaml), cache
 int8 | int4, ":graphs" = CUDA-graph engine (src/opendecider/deploy.py). Embeddings stay int8
 (every cached K/V and the state memory; GDN recurrent state stays bf16/fp32). Per config:
   memory  : GPU memory after load, and peak during one decide() for states of about 0.9k / 3.9k / 15k tokens
@@ -32,6 +33,7 @@ from opendecider.formatting import record_state_text  # noqa: E402
 from opendecider.guards import gpu_lock  # noqa: E402
 
 GB = 2 ** 30
+AWQ = {"Qwen/Qwen3.5-2B": "configs/backbone_2b_awq.yaml"}
 
 
 def logits(model, state_text, qs):
@@ -83,7 +85,12 @@ def main():
             w, kv, *mode = c.split(":")
             graphs = mode == ["graphs"]
             torch.cuda.empty_cache(); torch.cuda.reset_peak_memory_stats()
-            bb = Backbone.load(BackboneConfig(**{**ck["backbone_cfg"], "weight_quant": w, "kv_quant": kv}))
+            over = {"weight_quant": w, "kv_quant": kv}
+            if w == "awq":                  # pre-quantized AWQ checkpoint for this backbone (configs/*_awq.yaml)
+                import yaml
+                over.update({k: v for k, v in yaml.safe_load(open(AWQ[ck["backbone_cfg"]["repo_id"]])).items()
+                             if k in ("path", "repo_id", "revision")})
+            bb = Backbone.load(BackboneConfig(**{**ck["backbone_cfg"], **over}))
             model, extra = load_model(a.ckpt, backbone=bb)
             dec = Decider(model, extra.get("temperature", 1.0), extra.get("temperature_by_type"))
             if graphs:

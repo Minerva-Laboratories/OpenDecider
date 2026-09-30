@@ -26,10 +26,11 @@ class BackboneConfig:
     repo_id: str = "Qwen/Qwen3.5-0.8B"
     revision: str = "2fc06364715b967f1860aea9cf38778875588b17"
     dtype: str = "bfloat16"
-    weight_quant: str = "int8"          # none | int8 | nf4 (bitsandbytes) | w4 | w8 (GemLite Triton GEMMs); embeddings int8
+    weight_quant: str = "int8"          # none | int8 | nf4 (bitsandbytes) | w4 | w8 | awq4 (GemLite Triton GEMMs)
     kv_quant: str = "int8"              # none | int8 | int4  (all cached K/V and state memory)
     quantize_linear_state: bool = False  # GDN recurrent/conv state (not a KV cache)
     feature_layers: list = field(default_factory=lambda: ["final"])  # "final" = post-norm last layer, or ints 1..L
+    awq_path: str = ""                  # weight_quant=awq4: calibrated scales (scripts/awq_calibrate.py)
     prefill_chunk: int = 0              # state pass in chunks of this many tokens; 0 = one pass (measured: no peak
                                         # memory gain on the Orin, +34% latency at 15k tokens)
     device: str = "cuda"
@@ -81,10 +82,16 @@ class Backbone(nn.Module):
             kw["quantization_config"] = BitsAndBytesConfig(
                 load_in_4bit=True, bnb_4bit_quant_type="nf4", bnb_4bit_use_double_quant=True,
                 bnb_4bit_compute_dtype=dtype)
+        from .ct_load import is_compressed_tensors
+        if is_compressed_tensors(cfg.path):                   # pre-quantized AWQ (llm-compressor, see ct_load.py)
+            from .ct_load import load_qwen35_ct
+            lm, head = load_qwen35_ct(cfg.path, cfg.device, dtype)
+            return cls(lm, AutoTokenizer.from_pretrained(cfg.path), cfg, head)
         if cfg.path.endswith(".gguf"):                        # llama.cpp quantized weights (see gguf_load.py)
             from .gguf_load import load_qwen35_gguf
             d = os.path.dirname(cfg.path)
-            lm, head = load_qwen35_gguf(cfg.path, d, cfg.device, dtype, cfg.weight_quant)
+            awq = torch.load(cfg.awq_path, weights_only=False)["params"] if cfg.weight_quant == "awq4" else None
+            lm, head = load_qwen35_gguf(cfg.path, d, cfg.device, dtype, cfg.weight_quant, awq)
             return cls(lm, AutoTokenizer.from_pretrained(d), cfg, head)
         src, rev = (cfg.path, None) if os.path.isdir(cfg.path) else (cfg.repo_id, cfg.revision)
         tok = AutoTokenizer.from_pretrained(src, revision=rev)
@@ -98,7 +105,10 @@ class Backbone(nn.Module):
             quantize_int8_(lm.layers)
         if cfg.weight_quant in ("w4", "w8"):      # low-bit weights on Triton GEMM kernels (GemLite)
             gemlite_quantize_(lm.layers, 4 if cfg.weight_quant == "w4" else 8)
-        if cfg.weight_quant in ("int8", "nf4", "w4", "w8"):   # the embedding table is int8 in every quantized mode
+        if cfg.weight_quant == "awq4":             # calibrated 4-bit (scripts/awq_calibrate.py -> cfg.awq_path)
+            from .awq import apply_awq_
+            apply_awq_(lm.layers, torch.load(cfg.awq_path, weights_only=False)["params"])
+        if cfg.weight_quant != "none":             # the embedding table is int8 in every quantized mode
             lm.embed_tokens = Int8Embedding(lm.embed_tokens)
             torch.cuda.empty_cache()
         return cls(lm, tok, cfg, head)
