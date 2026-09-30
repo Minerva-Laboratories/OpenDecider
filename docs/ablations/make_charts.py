@@ -1,6 +1,6 @@
-"""Static charts for the findings report (reads reports/data.json, writes reports/fig_*.png).
+"""Ablation charts for docs/RESULTS.md §8 (reads docs/ablations/data.json, writes docs/img/ablation_*.png).
 
-    python3 reports/make_charts.py        # system python (matplotlib)
+    python3 docs/ablations/make_charts.py        # system python (matplotlib)
 Palette: validated reference categorical slots (blue, orange, aqua, yellow), fixed order; light surface.
 Two slots are below 3:1 contrast on white, so every chart has direct value labels and the PDF carries tables.
 """
@@ -11,7 +11,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
-D = json.load(open("reports/data.json"))
+D = json.load(open("docs/ablations/data.json"))
 C = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100"]
 # colour follows the MODEL across all figures: V0 synth-only, V0 mixed, V3 branched, V3 branched + VeRA
 V0S, V0M, V3B, V3V = C
@@ -59,7 +59,7 @@ for xv, lab in ((ch, f"chance {ch:.2f}"), (zs, f"frozen LLM zero-shot {zs:.2f}")
     ax.text(xv + 0.005, len(rows) - 0.45, lab, color=INK2, fontsize=7.5)
 ax.set_xlim(0, 1); ax.set_xlabel("validation accuracy, record_lookup (522 questions), final eval")
 ax.grid(axis="y", visible=False)
-fig.savefig("reports/fig1_lookup.png"); plt.close(fig)
+fig.savefig("docs/img/ablation_lookup.png"); plt.close(fig)
 
 # ---------------------------------------------------------------- Fig 2: public benchmarks
 B = [("banking77_77way", "Banking77\n77-way"), ("banking77_8way", "Banking77\n8-way"), ("pubmedqa", "PubMedQA\nyes/no"),
@@ -86,7 +86,7 @@ ax.set_xticks(range(len(B))); ax.set_xticklabels([l for _, l in B], fontsize=7.8
 ax.set_ylim(0, 1); ax.set_ylabel("accuracy (95% bootstrap CI)")
 ax.legend(fontsize=7, ncol=3, loc="upper center", bbox_to_anchor=(0.5, -0.2), frameon=False)
 ax.grid(axis="x", visible=False)
-fig.savefig("reports/fig2_public.png"); plt.close(fig)
+pass  # public chart superseded by docs/make_figures.py; plt.close(fig)
 
 # ---------------------------------------------------------------- Fig 3: behavioural probes
 P = D["probes"]
@@ -105,7 +105,7 @@ for ax, (k, t, note) in zip(axes, M):
     ax.set_title(t, fontsize=7.4, color=INK); ax.set_xticks([0, 1]); ax.set_xticklabels(["V0\n(mixed)", "V3 branched\n(mixed)"], fontsize=7)
     ax.set_xlabel(note, fontsize=6.8); ax.grid(axis="x", visible=False); ax.set_ylim(0, 0.62)
 fig.tight_layout(w_pad=0.6)
-fig.savefig("reports/fig3_probes.png"); plt.close(fig)
+fig.savefig("docs/img/ablation_probes.png"); plt.close(fig)
 
 # ---------------------------------------------------------------- Fig 4: VeRA vs frozen validation curves
 fig, ax = plt.subplots(figsize=(4.6, 2.6))
@@ -115,7 +115,7 @@ for i, (run, lab) in enumerate((("mix2-v3branch", "frozen backbone"), ("mix2-v3b
     ax.plot(xs, ys, color=C[i + 2], lw=2, marker="o", ms=4)
     ax.text(xs[-1] + 40, ys[-1], f"{lab} ({ys[-1]:.3f})", color=INK, fontsize=7.5, va="center")
 ax.set_xlim(300, 2750); ax.set_xlabel("training step"); ax.set_ylabel("validation accuracy\n(synthetic + public + injection)")
-fig.savefig("reports/fig4_vera.png"); plt.close(fig)
+fig.savefig("docs/img/ablation_vera.png"); plt.close(fig)
 
 # ---------------------------------------------------------------- Fig 5: synthetic ID vs OOD, equal budget
 fig, ax = plt.subplots(figsize=(4.6, 2.6))
@@ -130,5 +130,5 @@ ax.set_xticks([0, 1]); ax.set_xticklabels(["in-distribution\n(13 train families)
 ax.set_ylim(0.3, 0.62); ax.set_ylabel("test accuracy (95% CI)")
 ax.legend(fontsize=7.5, frameon=False, loc="upper center", bbox_to_anchor=(0.5, -0.22), ncol=2)
 ax.grid(axis="x", visible=False)
-fig.savefig("reports/fig5_synthetic.png"); plt.close(fig)
+fig.savefig("docs/img/ablation_synthetic.png"); plt.close(fig)
 print("charts written")

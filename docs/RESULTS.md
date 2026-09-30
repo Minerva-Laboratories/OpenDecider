@@ -209,7 +209,7 @@ and as `gbdt` once a domain has a few hundred labeled decisions.
 
 ## 5. Behavioral probes
 
-Source: `reports/data.json`.
+Source: `docs/ablations/data.json`.
 
 | Probe | LLM-with-head (V0) | OpenDecider V3 (slot_emb=none) |
 |---|---|---|
@@ -290,3 +290,92 @@ Findings:
   argmax by construction.
 - Histogram binning wins on the skewed binary prompt-injection split (stitched: 0.536 vs 0.604).
 - The selection policy built on these results is in `docs/roadmap_designs.md` §2.
+
+## 8. Architecture ablations (earlier runs, Qwen3.5-0.8B backbone)
+
+These runs chose the V3 branched design. They use the 0.8B backbone, so their absolute numbers are lower than the 2B
+results above. Data: `docs/ablations/data.json` (built by `docs/ablations/collect.py`; charts by
+`docs/ablations/make_charts.py`). Variants:
+
+| Variant | Design | Outcome |
+|---|---|---|
+| V0 | One causal row `[state][question][options]`, MLP readout per option marker | Strong baseline; order-sensitive |
+| V1 | Late fusion: question and options pooled to vectors, small transformer over state memory | Fails (chance) |
+| V3 isolated | Dense tokens of state, question and options, each encoded alone, then the trunk | Fails to bind question to state |
+| V3 conditioned | Same trunk on features from the V0-style causal row | About equal to V0 |
+| V3 branched | The backbone reads one row `[question; option_k]` per option from the cached state | Best |
+| V3 branched + VeRA | VeRA adapters on the top 6 layers, active only on option rows | Best, adapted |
+
+### H1. The question must bind to the state inside the frozen backbone
+
+Training on `record_lookup` only (about 1.5k states, about 20 JSON records each). Final validation accuracy:
+
+| Design | Accuracy |
+|---|---|
+| V0 | 0.833 |
+| V3 conditioned | 0.826 |
+| V3 branched | 0.879 |
+| V3 isolated + question-aware context layers | 0.264 |
+| V3, options matched to the question's final state (embeddings) | 0.251 |
+| V3, options matched to the question's final state (hidden) | 0.259 |
+
+The trunk on isolated features stays at chance. Every design where the backbone reads the question with the state in
+context learns quickly. Late-fusion V1 ended at 0.343 validation accuracy on the full synthetic suite (chance 0.30).
+Result: supported.
+
+<p align="center"><img src="img/ablation_lookup.png" alt="lookup diagnostic" width="700"></p>
+
+### H2. The backbone must read each option in context
+
+Matching option hidden states to the question's final state is at chance (0.264, untrained): hidden states predict the
+next token. Matching option token embeddings gives 0.414 to 0.443 untrained, and a trained bilinear readout plateaus
+near 0.45. Options read inside the backbone reach 0.83 to 0.88. Result: supported.
+
+### H3. Branched reading generalizes better than one causal row
+
+V0 and V3 branched, 1,500 steps each on synthetic data, 500 test states per split:
+
+| Model | In-distribution | OOD (7 unseen families) |
+|---|---|---|
+| V0 | 0.539 [0.517, 0.563] | 0.495 [0.471, 0.520] |
+| V3 branched | 0.521 [0.497, 0.544] | 0.538 [0.515, 0.562] |
+
+Result: supported for OOD generalization, not for in-distribution accuracy (CIs overlap).
+
+<p align="center"><img src="img/ablation_synthetic.png" alt="synthetic test accuracy" width="520"></p>
+
+### H4. Source of option-order sensitivity (O6)
+
+See the probe table in §5. V0 reads options in one causal row and is order-sensitive (mean TV 0.216). A duplicated
+option gains 0.457 of the mass, almost all on the later copy (a recency effect). V3 branched is exactly
+permutation-invariant and splits duplicates evenly. It shows a length bias: a longer wording of the same option gains
+0.219. Both models are deterministic across repeated calls. Causal reading of the option list is a sufficient
+mechanism for O6. V0 is consistent with the anecdotal O6 observation. V3 branched is inconsistent with it unless slot
+embeddings are enabled. Both are inconsistent with O7 unless the stochastic sampler is on.
+
+<p align="center"><img src="img/ablation_probes.png" alt="probe signatures" width="700"></p>
+
+### H5. Data coverage drives recognition tasks
+
+Accuracy on held-out public benchmarks (ECE in parentheses). The benchmark datasets were never used for training.
+
+| Run | Banking77 77-way | Banking77 8-way | PubMedQA | OpenBookQA | CommonsenseQA | Prompt injections |
+|---|---|---|---|---|---|---|
+| V0, synthetic only | 0.130 (0.335) | 0.600 (0.166) | 0.642 (0.178) | 0.312 (0.354) | 0.410 (0.314) | 0.483 (0.365) |
+| V0, mixed corpus | 0.380 (0.155) | 0.769 (0.117) | 0.645 (0.187) | 0.422 (0.259) | 0.474 (0.221) | 0.483 (0.403) |
+| V3 branched, mixed | 0.471 (0.193) | 0.787 (0.086) | 0.718 (0.034) | 0.390 (0.236) | 0.457 (0.246) | 0.491 (0.334) |
+| V3 branched, mixed + injection data | 0.439 (0.221) | 0.781 (0.119) | 0.693 (0.045) | 0.404 (0.229) | 0.469 (0.253) | 0.603 (0.201) |
+| V3 branched + VeRA, same data | 0.482 (0.128) | 0.806 (0.068) | 0.700 (0.066) | 0.386 (0.264) | 0.462 (0.242) | 0.681 (0.126) |
+
+Adding permissive public data moved Banking77 77-way from 0.130 to 0.380 and OpenBookQA from 0.312 to 0.422. Adding
+injection data moved prompt injections from 0.491 to 0.603. Synthetic-only validation accuracy had plateaued.
+Result: supported. The untrained 0.8B zero-shot baseline scored 0.370 (ECE 0.206) on synthetic validation.
+
+### H6. Row-only adapters help without touching the shared state cache
+
+VeRA on option rows leads at every validation checkpoint (0.648 at step 1,500 vs 0.638 frozen at step 2,000). It improves recognition
+accuracy and calibration on the public benchmarks above, with no gain on knowledge-heavy multiple choice. Fitted
+per-type temperatures (choice 1.067, noul 0.915, score 0.564) show that Score answers are under-confident, so one
+global temperature is the wrong correction. Result: supported for recognition and calibration.
+
+<p align="center"><img src="img/ablation_vera.png" alt="VeRA vs frozen validation accuracy" width="520"></p>

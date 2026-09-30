@@ -1,6 +1,6 @@
-"""Collect every number used in the findings report from run artifacts into reports/data.json.
+"""Collect every number used in the ablation section of docs/RESULTS.md from run artifacts into docs/ablations/data.json.
 
-    .venv/bin/python reports/collect.py
+    .venv/bin/python docs/ablations/collect.py
 Nothing is typed by hand: public/synthetic evals come from runs/*/eval_*.json, probes from runs/probes-*/probes.json,
 validation curves and diagnostics from the training logs.
 """
@@ -65,7 +65,7 @@ for alt in ["lk-v3qcond-hidden", "lk-v3qemb-fullcross"]:
     if not data["lookup_val"].get(alt):
         data["lookup_val"][alt] = evals_from_log(f"{R}/{alt}.log")
 os.makedirs("reports", exist_ok=True)
-json.dump(data, open("reports/data.json", "w"), indent=1)
-print("wrote reports/data.json")
+json.dump(data, open("docs/ablations/data.json", "w"), indent=1)
+print("wrote docs/ablations/data.json")
 for k, v in data["lookup_val"].items():
     print(k, [(e["step"], round(e["acc"], 3)) for e in v])
