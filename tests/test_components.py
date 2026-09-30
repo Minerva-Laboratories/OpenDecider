@@ -73,3 +73,17 @@ def test_span_pool_modes():
     assert torch.allclose(span_pool(h, sp, "last")[0], h[0, 3])
     w = torch.tensor([1., 2., 3.]) / 6
     assert torch.allclose(span_pool(h, sp, "weighted")[0], (w[:, None] * h[0, 1:4]).sum(0))
+
+
+def test_int4_tensor_roundtrip_and_rows():
+    import torch
+    from opendecider.quant import Int4Tensor, Int8Tensor, maybe_quantize
+    torch.manual_seed(0)
+    x = torch.randn(3, 4, 50, 72)                                   # last dim not a multiple of the group size
+    q = maybe_quantize(x, "int4")
+    assert isinstance(q, Int4Tensor) and isinstance(q, Int8Tensor) and q.shape == x.shape
+    err = (q.dequantize() - x).abs() / x.abs().amax()
+    assert err.max() < 0.08 and q.nbytes() < x.numel() * 2 * 0.5    # under half of bf16 (incl. scales, padding)
+    rows = torch.tensor([2, 0])
+    assert torch.equal(q.index_select(0, rows).dequantize(), q.dequantize().index_select(0, rows))
+    assert isinstance(maybe_quantize(x, "int8"), Int8Tensor) and maybe_quantize(x, False) is x

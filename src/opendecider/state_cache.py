@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 import torch
 
 from .backbone import PackedCache
-from .quant import maybe_quantize, materialize
+from .quant import kv_mode, maybe_quantize, materialize
 
 _KV = ("keys", "values")
 _ST = ("conv_states", "recurrent_states")
@@ -69,7 +69,7 @@ class PrefixCache:
             for a in _KV:
                 t = getattr(layer, a, None)
                 if isinstance(t, torch.Tensor) and t.numel():
-                    kv[(li, a)] = maybe_quantize(t[..., n0:n_tokens, :].contiguous(), self.bb.cfg.kv_quant == "int8")
+                    kv[(li, a)] = maybe_quantize(t[..., n0:n_tokens, :].contiguous(), kv_mode(self.bb.cfg))
             for a in _ST:
                 d = getattr(layer, a, None)
                 if isinstance(d, dict):
@@ -142,7 +142,7 @@ class PrefixCache:
         if self.template is None:
             self._set_template(cache)
         T = ends[-1] + len(tail) if content else len(tail)
-        pc = PackedCache.pack(cache, kv_int8=bb.cfg.kv_quant == "int8", state_int8=bb.cfg.quantize_linear_state)
+        pc = PackedCache.pack(cache, kv_int8=kv_mode(bb.cfg), state_int8=bb.cfg.quantize_linear_state)
         self.stats["requests"] += 1
         self.stats["hit_tokens"] += n_cached
         self.stats["new_tokens"] += T - n_cached

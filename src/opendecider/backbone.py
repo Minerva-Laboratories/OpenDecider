@@ -16,7 +16,7 @@ import torch
 import torch.nn as nn
 import yaml
 
-from .quant import Int8Embedding, Int8Tensor, materialize, maybe_quantize, quantize_int8_
+from .quant import Int8Embedding, Int8Tensor, kv_mode, materialize, maybe_quantize, quantize_int8_
 
 
 @dataclass
@@ -25,8 +25,8 @@ class BackboneConfig:
     repo_id: str = "Qwen/Qwen3.5-0.8B"
     revision: str = "2fc06364715b967f1860aea9cf38778875588b17"
     dtype: str = "bfloat16"
-    weight_quant: str = "int8"          # none | int8 | nf4
-    kv_quant: str = "int8"              # none | int8  (all cached K/V and state memory)
+    weight_quant: str = "int8"          # none | int8 | nf4 (bitsandbytes 4-bit; embeddings stay int8)
+    kv_quant: str = "int8"              # none | int8 | int4  (all cached K/V and state memory)
     quantize_linear_state: bool = False  # GDN recurrent/conv state (not a KV cache)
     feature_layers: list = field(default_factory=lambda: ["final"])  # "final" = post-norm last layer, or ints 1..L
     device: str = "cuda"
@@ -83,6 +83,7 @@ class Backbone(nn.Module):
         del full.lm_head      # tied to embeddings; we never produce tokens
         if cfg.weight_quant == "int8":
             quantize_int8_(lm.layers)
+        if cfg.weight_quant in ("int8", "nf4"):   # bitsandbytes has no 4-bit embedding: the table is int8 either way
             lm.embed_tokens = Int8Embedding(lm.embed_tokens)
             torch.cuda.empty_cache()
         return cls(lm, tok, cfg)
@@ -171,7 +172,7 @@ class Backbone(nn.Module):
         seqs = self.tokenize(state_texts)
         ids, mask = self.pad(seqs)
         f, _ = self.forward(ids, mask, self.cfg.feature_layers)
-        sm = StateMemory(maybe_quantize(f, self.cfg.kv_quant == "int8"), mask, sum(map(len, seqs)))
+        sm = StateMemory(maybe_quantize(f, kv_mode(self.cfg)), mask, sum(map(len, seqs)))
         sm.lens = torch.tensor([len(x) for x in seqs])          # CPU lengths: no GPU sync downstream
         return sm
 
@@ -196,7 +197,7 @@ class Backbone(nn.Module):
         with torch.set_grad_enabled(grad):
             f, cache = self.forward(ids, mask, self.cfg.feature_layers if return_hidden else ("final",), use_cache=True)
         q = (not grad) if quantize is None else quantize          # quantize=False: exact values without a graph
-        pc = PackedCache.pack(cache, kv_int8=self.cfg.kv_quant == "int8" and q,
+        pc = PackedCache.pack(cache, kv_int8=q and kv_mode(self.cfg),
                               state_int8=self.cfg.quantize_linear_state and q)
         return (pc, mask, f) if return_hidden else (pc, mask)
 
@@ -205,7 +206,7 @@ class Backbone(nn.Module):
     def prefix_cache(self, ids: torch.Tensor) -> "PackedCache":
         mask = torch.ones_like(ids, dtype=torch.bool)
         _, cache = self.forward(ids, mask, ("final",), use_cache=True)
-        return PackedCache.pack(cache, kv_int8=self.cfg.kv_quant == "int8",
+        return PackedCache.pack(cache, kv_int8=kv_mode(self.cfg),
                                 state_int8=self.cfg.quantize_linear_state)
 
 

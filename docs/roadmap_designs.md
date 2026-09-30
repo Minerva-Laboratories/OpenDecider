@@ -12,7 +12,7 @@ training data it needs, the deciding experiment and the current status.
 | 3. State reuse, Tier 1 (prefix cache) | `src/opendecider/chunking.py`, `src/opendecider/state_cache.py`, `scripts/bench_state_cache.py` | Implemented and used by `Decider._encode_state`. Benchmark below. |
 | 3. State reuse, Tier 2 (store) | `src/opendecider/store.py`, `src/opendecider/embed.py`, `eval/store_recall.py` | Library and recall evaluation implemented. Not yet wired into `/v1/decide`. |
 | 3. State reuse, Tier 3 (chunk-local features) | none | Research; not started. |
-| 4. Explanations | `src/opendecider/explain.py`, `/v1/explain` in `src/opendecider/api.py`, `eval/explain_eval.py` | Implemented. Evaluation pending. |
+| 4. Explanations | `src/opendecider/explain.py`, `/v1/explain` in `src/opendecider/api.py`, `eval/explain_eval.py` | Implemented and evaluated; results below. |
 
 ---
 
@@ -389,4 +389,25 @@ Checks from the original design, now in `eval/explain_eval.py`:
 - Human spot-check of 50 explanations.
 - Latency: explanation tokens only, reported separately from decision latency.
 
-Evaluation pending (`eval/explain_eval.py` on typed-decisions cases, `--n 24 --samples 4` by default).
+### Results
+
+`eval/explain_eval.py --n 24 --samples 4` on `runs/x2b` (24 typed-decisions test cases, 6 per workflow, one choice
+question each). Faithfulness reads only the explanation, with option names masked.
+
+| Metric | Value |
+|---|---|
+| P(decision), greedy explanation | 0.672 |
+| P(decision), best of 4 sampled | 0.876 |
+| P(decision), mismatched explanation (other case) | 0.297 |
+| P(decision), empty state | 0.281 |
+| Decision recovered (argmax), greedy / mismatched | 0.833 / 0.292 |
+| Drop in P(decision) when the top evidence record is removed | 0.255 (mean P(decision) 0.506) |
+| Latency, greedy, median | 16.5 s |
+
+- Generation blocks the `<think>` and `</think>` tokens. Without that the instruction-tuned backbone opens a
+  reasoning block and the first paragraph is empty.
+- Explanations can contain small factual slips (one sample said "532 seconds (over 9 minutes)"). A human spot-check
+  is still needed.
+- Latency is eager decoding on the Orin; the state is re-encoded instead of reusing the prefix cache.
+
+Source: `runs/explain/results.json`.

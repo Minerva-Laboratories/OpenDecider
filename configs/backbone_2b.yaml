@@ -5,7 +5,7 @@ repo_id: Qwen/Qwen3.5-2B
 revision: 15852e8c16360a2fea060d615a32b45270f8a8fc
 dtype: bfloat16
 weight_quant: int8
-kv_quant: int8
+kv_quant: int8                # none | int8 | int4
 quantize_linear_state: false
 # outputs after each full-attention layer (4, 8, ..., 20) + the final post-norm layer, combined per token by DepthAttn
 feature_layers: [4, 8, 12, 16, 20, final]

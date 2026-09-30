@@ -58,8 +58,55 @@ class Int8Tensor:
         return Int8Tensor(self.q.index_select(dim, idx), self.scale.index_select(dim, idx), self.dtype)
 
 
-def maybe_quantize(x: torch.Tensor, enabled: bool):
-    return Int8Tensor.quantize(x) if enabled else x
+class Int4Tensor(Int8Tensor):
+    """Symmetric int4 with one scale per group of G values along the last dim; two values per byte.
+    Same interface as Int8Tensor (a subclass, so existing isinstance checks and row selection keep working)."""
+    G = 32
+
+    def __init__(self, q, scale, dtype, last):
+        super().__init__(q, scale, dtype)
+        self.last = last                      # original last-dim size
+
+    @classmethod
+    def quantize(cls, x: torch.Tensor) -> "Int4Tensor":
+        last = x.shape[-1]
+        pad = (-last) % cls.G
+        xf = torch.nn.functional.pad(x.float(), (0, pad)) if pad else x.float()
+        g = xf.view(*xf.shape[:-1], -1, cls.G)                         # (..., n_groups, G)
+        scale = g.abs().amax(-1, keepdim=True).clamp_min(1e-8) / 7.0
+        v = (torch.round(g / scale).clamp_(-7, 7) + 8).to(torch.uint8).view(*xf.shape)   # 1..15
+        packed = v[..., 0::2] | (v[..., 1::2] << 4)
+        return cls(packed, scale.squeeze(-1).to(x.dtype if x.dtype != torch.float32 else torch.float32), x.dtype, last)
+
+    def dequantize(self, dtype: torch.dtype | None = None) -> torch.Tensor:
+        dt = dtype or self.dtype
+        lo, hi = (self.q & 0xF), (self.q >> 4)
+        v = torch.stack([lo, hi], -1).flatten(-2).to(dt) - 8
+        g = v.view(*v.shape[:-1], -1, self.G) * self.scale.to(dt)[..., None]
+        return g.flatten(-2)[..., : self.last]
+
+    @property
+    def shape(self):
+        return torch.Size([*self.q.shape[:-1], self.last])
+
+    def to(self, device) -> "Int4Tensor":
+        return Int4Tensor(self.q.to(device), self.scale.to(device), self.dtype, self.last)
+
+    def index_select(self, dim: int, idx: torch.Tensor) -> "Int4Tensor":
+        assert dim != -1 and dim != self.q.dim() - 1, "int4 rows only"
+        return Int4Tensor(self.q.index_select(dim, idx), self.scale.index_select(dim, idx), self.dtype, self.last)
+
+
+def kv_mode(cfg) -> str | bool:
+    """Cache quantization from a BackboneConfig: False | "int8" | "int4"."""
+    return cfg.kv_quant if cfg.kv_quant in ("int8", "int4") else False
+
+
+def maybe_quantize(x: torch.Tensor, enabled):
+    """enabled: False/None (keep), True or "int8" (Int8Tensor), "int4" (Int4Tensor)."""
+    if not enabled:
+        return x
+    return Int4Tensor.quantize(x) if enabled == "int4" else Int8Tensor.quantize(x)
 
 
 def materialize(x, dtype: torch.dtype | None = None) -> torch.Tensor:

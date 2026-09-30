@@ -20,7 +20,7 @@ from .formatting import option_text, question_text
 from .fusion import CrossAttention, GatedXAttnDense, PerceiverResampler
 from .heads import NEG, PointerHead
 from .options import SlotEmbedding, masked_mean, span_mean, span_pool
-from .quant import Int8Tensor, materialize, maybe_quantize
+from .quant import Int8Tensor, kv_mode, materialize, maybe_quantize
 
 
 @dataclass
@@ -272,7 +272,7 @@ class V1(DecisionModel):
         mask = sm.mask
         if self.resampler is not None:
             f, mask = self.resampler(f, mask)
-        q8 = cache and self.backbone.cfg.kv_quant == "int8"
+        q8 = cache and kv_mode(self.backbone.cfg)
         kv = [maybe_quantize(l.xa.project_kv(f), q8) for l in self.layers]
         return Memory(sm.feats if cache else None, mask if self.resampler is None else sm.mask, kv,
                       n_tokens=sm.n_tokens, kv_mask=mask)
@@ -374,7 +374,7 @@ class V2(DecisionModel):
         mask = sm.mask
         if self.resampler is not None:
             f, mask = self.resampler(f, mask)
-        q8 = cache and self.backbone.cfg.kv_quant == "int8"
+        q8 = cache and kv_mode(self.backbone.cfg)
         kv = [maybe_quantize(b.project_kv(f), q8) for b in self.blocks]
         return Memory(sm.feats if cache else None, mask if self.resampler is None else sm.mask, kv,
                       n_tokens=sm.n_tokens, kv_mask=mask)

@@ -115,6 +115,38 @@ unrelated state. AUROC measures how well P(none) separates unanswerable from ans
 Accuracy on answerable questions is unchanged (0.892). A learned `none` vector with only its two parameters trained
 did worse (unrelated-state AUROC 0.537). See [`docs/roadmap_designs.md`](docs/roadmap_designs.md).
 
+### Quantization (Jetson AGX Orin, 2B backbone, no retraining)
+
+The model was trained with int8 weights and an int8 cache. Memory and latency come from one fresh process per
+config. Accuracy: 500 typed-decisions questions (first 100 test cases), Banking77 8-way (160), prompt-injection
+detection (116).
+
+| Weights / cache | Weight memory | Peak GPU memory, 0.8k / 3.7k / 15k-token state | Latency, same states | Stored state, 15k tokens | typed-decisions | Banking77 | Injection detection |
+|---|---|---|---|---|---|---|---|
+| int8 / int8 (default) | 1.88 GB | 3.5 / 4.4 / 7.7 GB | 0.82 / 1.69 / 5.70 s | 106 MB | 0.426 | 0.819 | 0.776 |
+| int8 / int4 | 1.88 GB | 3.5 / 4.4 / 7.6 GB | 0.83 / 1.71 / 5.77 s | 67 MB | 0.444 | 0.812 | 0.767 |
+| NF4 / int8 | 1.26 GB | 2.9 / 3.8 / 7.1 GB | 0.63 / 1.50 / 5.47 s | 106 MB | 0.406 | 0.756 | 0.707 |
+| NF4 / int4 | 1.26 GB | 2.9 / 3.8 / 7.0 GB | 0.64 / 1.52 / 5.60 s | 67 MB | 0.410 | 0.781 | 0.698 |
+
+- A 4-bit cache is safe (accuracy within noise) but saves little: the backbone has only 6 attention layers with few
+  KV heads, so the stored state for 15k tokens is about 0.1 GB either way. The GDN recurrent state stays bf16.
+- 4-bit weights (NF4) save 0.6 GB and about 20% latency on short states, but cost 4 to 8 points on the public sets.
+  Retraining the head on NF4 features may recover part of that.
+- Peak memory is dominated by activations of the question rows, not by weights or cache.
+
+Set `weight_quant: nf4` and `kv_quant: int4` in `configs/backbone*.yaml`. Script: `scripts/bench_quant.py`.
+
+### Explanations (`/v1/explain`, 2B backbone, 24 typed-decisions cases)
+
+The decision model re-reads only the explanation, with every option name masked, and tries to reach the same decision.
+
+| Check | Value |
+|---|---|
+| Decision recovered from the explanation alone (greedy) | 83% (mismatched explanation: 29%) |
+| P(decision) from the explanation alone, greedy / best of 4 | 0.67 / 0.88 (mismatched: 0.30, empty: 0.28) |
+| Drop in P(decision) when the top cited record is removed | 0.25 (mean P(decision): 0.51) |
+| Latency per greedy explanation, Orin | 16.5 s median (eager generation, not optimized) |
+
 ### Prefix cache (Jetson AGX Orin, 2B backbone)
 
 A state grows by one record between two requests. The top answer matched the uncached path on every question.
@@ -156,7 +188,7 @@ Design notes: [`docs/roadmap_designs.md`](docs/roadmap_designs.md),
 
 | | Minimum | Tested |
 |---|---|---|
-| GPU memory, 2B backbone | 4 GB for states up to about 1k tokens, 5 GB up to 4k, 8 GB up to 15k (int8 weights: 1.9 GB) | Jetson AGX Orin 64 GB (inference), DGX Spark (training) |
+| GPU memory, 2B backbone | 3.5 GB for states up to about 1k tokens, 4.5 GB up to 4k, 8 GB up to 15k (int8 weights: 1.9 GB). With 4-bit weights: 2.9 / 3.8 / 7.0 GB | Jetson AGX Orin 64 GB (inference), DGX Spark (training) |
 | GPU memory, 9B backbone | about 10 GB of int8 weights plus the same per-state cost (estimate, not measured) | Jetson AGX Orin 64 GB |
 | Host RAM | 12 GB peak while loading the 2B backbone | same |
 | Disk, 2B backbone | 4.3 GB weights + about 0.1 GB checkpoint | same |
@@ -165,7 +197,8 @@ Design notes: [`docs/roadmap_designs.md`](docs/roadmap_designs.md),
 | Python | 3.12 | 3.12 on aarch64 (JetPack) |
 | CPU only | Unit tests only (tiny random model) | – |
 
-Weights are loaded as int8, so GPU memory is lower than the bf16 download size. The prefix cache adds up to
+Weights are loaded as int8 (or NF4, see [Quantization](#quantization-jetson-agx-orin-2b-backbone-no-retraining)), so GPU memory is lower
+than the bf16 download size. The prefix cache adds up to
 `OPENDECIDER_STATE_CACHE_MB` (default 2 GB). The code keeps at least 4 GB of disk
 free and refuses downloads that would go below that.
 

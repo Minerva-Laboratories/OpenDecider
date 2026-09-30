@@ -37,7 +37,7 @@ from .heads import NEG
 from .models import DecisionModel, DecisionOutput, Memory, VARIANTS
 from .options import SlotEmbedding
 from .cache import TokenCache, encode_missing, segment_layout
-from .quant import Int8Tensor, materialize, maybe_quantize
+from .quant import Int8Tensor, kv_mode, materialize, maybe_quantize
 
 
 class ScaleNorm(nn.Module):
@@ -224,7 +224,7 @@ class V3(DecisionModel):
     def prepare_memory(self, sm: StateMemory, cache: bool, noise_std: float = 0.0) -> Memory:
         f = self._noise(self._mix(sm.get(torch.float32)), noise_std).float()
         # the dense state tokens ARE the memory; store int8 when caching (inference)
-        keep = maybe_quantize(f, cache and self.backbone.cfg.kv_quant == "int8")
+        keep = maybe_quantize(f, cache and kv_mode(self.backbone.cfg))
         m = Memory(keep, sm.mask, [], n_tokens=sm.n_tokens, kv_mask=sm.mask)
         m.lens = getattr(sm, "lens", None)
         m.raw_feats = sm.feats if cache else None
@@ -461,7 +461,7 @@ class V3(DecisionModel):
                                layers=bb.cfg.feature_layers, past_key_values=pc.unpack_rows(sg), use_cache=True,
                                past_mask=smask.index_select(0, sg))
                 Q[gi.to(dev), :Lg] = self._wide(fq).to(fdt)
-                pcq = PackedCache.pack(cache, kv_int8=bb.cfg.kv_quant == "int8" and not grad,
+                pcq = PackedCache.pack(cache, kv_int8=(not grad) and kv_mode(bb.cfg),
                                        state_int8=bb.cfg.quantize_linear_state and not grad)
                 pmq = torch.cat([smask.index_select(0, sg), torch.ones(len(gi), Lg, dtype=torch.bool, device=dev)], 1)
                 ng = n_opt[gi]

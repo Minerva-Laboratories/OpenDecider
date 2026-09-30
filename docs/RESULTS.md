@@ -379,3 +379,26 @@ per-type temperatures (choice 1.067, noul 0.915, score 0.564) show that Score an
 global temperature is the wrong correction. Result: supported for recognition and calibration.
 
 <p align="center"><img src="img/ablation_vera.png" alt="VeRA vs frozen validation accuracy" width="520"></p>
+
+## 9. Quantization of weights and cache (2B backbone, no retraining)
+
+`scripts/bench_quant.py` on `runs/x2b`. Memory and latency: one fresh process per config (`runs/quant/mem_*.json`),
+prefix cache off, after a warm-up call. Accuracy (`runs/quant/bench_accuracy.json`): first 100 typed-decisions test
+cases (500 questions, all from the agent-trace workflow, so lower than the full-test accuracy), Banking77 8-way (160)
+and prompt-injection detection (116). No confidence intervals were computed for this table; with these sample sizes,
+differences below about 0.04 (typed-decisions) or 0.06 (public sets) are within noise.
+
+| Weights / cache | Weights (GB) | Peak GB at 838 / 3,744 / 14,752 tokens | Latency s, same states | Stored state, 14,752 tokens (MB) | typed acc | typed KL | typed Brier | Banking77 8-way | Injection detection |
+|---|---|---|---|---|---|---|---|---|---|
+| int8 / int8 | 1.877 | 3.529 / 4.397 / 7.681 | 0.816 / 1.685 / 5.698 | 105.6 | 0.426 | 0.354 | 0.191 | 0.819 | 0.776 |
+| int8 / int4 | 1.877 | 3.527 / 4.384 / 7.644 | 0.825 / 1.710 / 5.767 | 67.3 | 0.444 | 0.346 | 0.187 | 0.812 | 0.767 |
+| NF4 / int8 | 1.258 | 2.908 / 3.776 / 7.060 | 0.634 / 1.503 / 5.472 | 105.6 | 0.406 | 0.377 | 0.208 | 0.756 | 0.707 |
+| NF4 / int4 | 1.258 | 2.906 / 3.765 / 7.022 | 0.636 / 1.519 / 5.601 | 67.3 | 0.410 | 0.363 | 0.202 | 0.781 | 0.698 |
+
+- int4 cache: `Int4Tensor` (symmetric, one scale per 32 values, two values per byte) for every cached K/V and the
+  state memory. The stored state shrinks from 105.6 to 67.3 MB at 14,752 tokens; the rest is the fixed-size GDN
+  recurrent state (bf16). Accuracy changes are within noise.
+- NF4 weights: bitsandbytes 4-bit with double quantization; the embedding table stays int8. Weights drop from 1.877 to
+  1.258 GB and short-state latency by about 22%. Public-set accuracy drops by 4 to 8 points.
+- Peak memory is set by the question-row activations and the cached bf16 embedding table used for the LM log-prob
+  feature (about 1 GB), not by weights or cache.

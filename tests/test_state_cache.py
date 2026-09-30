@@ -103,3 +103,17 @@ def test_backbone_embedder_normalised_and_order_free():
     assert abs(float(v[0] @ v[3]) - 1) < 1e-4                            # identical texts, different batch slots
     v2 = e(texts[::-1])
     assert abs(float(v2[::-1][1] @ v[1]) - 1) < 1e-3
+
+
+def test_int4_cache_end_to_end_close_to_unquantized(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENDECIDER_STATE_CACHE_MB", "64")
+    s = {"ticket": "charged twice", "history": [{"n": i, "note": "called support " * 2} for i in range(8)]}
+    out = {}
+    for kv in ("none", "int4"):
+        m = make(tiny_backbone(kv_quant=kv, layers=(4, "final")), "v3", v3_features="branched",
+                 v3_row_format="answer", slot_emb="none", v3_cross="question")
+        d = Decider(m, profiles_dir=str(tmp_path))
+        d.decide({"state": s, "questions": QS})
+        out[kv] = d.decide({"state": s, "questions": QS})                  # second call: served from the int4 cache
+    assert out["int4"]["state_cached_tokens"] > 0
+    assert (_probs(out["none"]) - _probs(out["int4"])).abs().max() < 5e-2
