@@ -267,11 +267,41 @@ Environment variables:
 
 ## Limitations
 
-- Accuracy trails Jev and Decider 1 on typed-decisions.
+### Known limitations
+
+- Accuracy trails Jev and Decider 1 on typed-decisions (zero-shot 0.616 vs 0.727 and 0.768).
 - The stitched 9B loses accuracy on prompt-injection detection (0.595 vs 0.767 for the 2B).
+- 4-bit weights (NF4) cost 4 to 8 points on the public sets because the head was trained on int8 features.
 - Tree profiles overfit below about 250 labels. Use `method: "auto"` and let cross-validation choose.
-- Latency is 0.3 to 1.9 s per request on the Orin for states up to about 4k tokens. The TensorRT path is not done.
+- Latency is 0.8 to 1.6 s per request on the Orin for states up to about 4k tokens, and about 5 s at 15k. The target
+  (p50 < 150 ms) needs CUDA graphs and TensorRT, which are not done.
+- Explanations take about 16 s each on the Orin (eager decoding) and can contain small factual slips.
+- The prefix cache matches the uncached path to within 0.007 to 0.026 in probability (int8 cache boundaries), not
+  bit-exactly.
+- Dense retrieval uses mean-pooled backbone states, which is a weak retriever. BM25 is the default.
 - There is no Jev API access. All Jev numbers come from TypeSafe or third parties.
+- Checkpoints are not published yet.
+
+### Not measured yet
+
+Everything below is either running or planned. Results will be added here and in [`docs/RESULTS.md`](docs/RESULTS.md).
+
+| Area | Status |
+|---|---|
+| 9B backbone: memory, latency, quantization, prefix cache, `none` option, explanations | Planned. The 9B has only the zero-shot stitched evaluations (typed-decisions and the public sets). |
+| 9B training (warm start from the stitched head) | Planned, on a separate training machine. |
+| Quantization accuracy for int8 / int4 and NF4 / int8 | Running. |
+| GPUs other than the Jetson AGX Orin (desktop and data-center cards, DGX Spark inference) | Planned. All memory and latency numbers are from one Orin 64 GB. |
+| GPU tests in CI | Planned. Unit tests run on CPU with a tiny random model; one GPU test covers the fused attention path. |
+| Confidence intervals for the quantization and explanation tables | Planned. Those tables use single runs on subsets (500 + 276 questions, 24 cases). |
+| typed-decisions with the train split (specialist mode, as Verdict and Laya report) | Planned. |
+| `none` option on out-of-distribution sets and hard negatives | Planned. Current numbers use held-out questions from the training families. |
+| Robustness to prompt injection inside a state (not detection) | Planned. |
+| Behavioral probe battery on Jev itself | Blocked on API access. |
+| Retrieval store inside `/v1/decide`, and a dedicated embedding model | Planned. The store is a library with a synthetic recall benchmark. |
+| Explanations: human review, prefix-cache reuse, faster decoding | Planned. |
+| More than 255 options (two-stage path) at scale | Planned. Implemented and unit-tested, not benchmarked. |
+| Languages other than English | Planned. |
 
 ## Roadmap
 
