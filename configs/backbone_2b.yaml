@@ -1,0 +1,12 @@
+# Qwen3.5-2B (post-trained), hybrid 18 GDN + 6 gated full-attention layers, hidden 2048. Apache-2.0.
+# Downloaded with: python -m opendecider.fetch --repo Qwen/Qwen3.5-2B --revision main --out models/qwen3.5-2b
+path: models/qwen3.5-2b       # local copy; falls back to repo_id@revision when missing
+repo_id: Qwen/Qwen3.5-2B
+revision: 15852e8c16360a2fea060d615a32b45270f8a8fc
+dtype: bfloat16
+weight_quant: int8
+kv_quant: int8
+quantize_linear_state: false
+# outputs after each full-attention layer (4, 8, ..., 20) + the final post-norm layer, combined per token by DepthAttn
+feature_layers: [4, 8, 12, 16, 20, final]
+device: cuda

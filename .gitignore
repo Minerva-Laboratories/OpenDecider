@@ -1,0 +1,19 @@
+.venv/
+__pycache__/
+*.pyc
+runs/
+data/cache/
+data/raw/
+data/synthetic/*.jsonl
+*.pt
+*.safetensors
+*.onnx
+*.engine
+data/public/
+data/public_train/
+models/
+data/public_context/
+data/typed_decisions/
+
+# local assistant instructions (the spec is docs/SPEC.md)
+CLAUDE.md

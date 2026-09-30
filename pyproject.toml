@@ -1,0 +1,18 @@
+[project]
+name = "opendecider"
+version = "0.1.0"
+description = "Open, speculative reconstruction of a System-One decision model (hypothesis test; not TypeSafe's code)."
+requires-python = ">=3.12"
+dependencies = ["torch>=2.10", "transformers>=5.2", "pyyaml", "numpy", "fastapi", "uvicorn", "pydantic>=2"]
+
+[project.optional-dependencies]
+eval = ["lightgbm>=4", "matplotlib"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "."]
+markers = ["gpu: needs the real backbone on CUDA (takes the GPU lock)"]
+filterwarnings = ["ignore::UserWarning"]

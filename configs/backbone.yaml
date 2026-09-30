@@ -1,0 +1,11 @@
+# Frozen backbone. Qwen3.5-0.8B = post-trained (instruct) model; hybrid 18 Gated DeltaNet : 6 gated
+# full-attention layers (3:1), hidden 1024. Apache-2.0. Pinned revision below (HF commit sha).
+path: models/qwen3.5-0.8b     # local copy; falls back to repo_id@revision when missing
+repo_id: Qwen/Qwen3.5-0.8B
+revision: 2fc06364715b967f1860aea9cf38778875588b17
+dtype: bfloat16
+weight_quant: int8            # none | int8 (weight-only, per-channel; lossless-ish) | nf4 (bnb; lossy on 0.8B)
+kv_quant: int8                # all cached K/V + state memory stored int8
+quantize_linear_state: false  # GDN recurrent/conv state is not a KV cache; kept fp32 per model config
+feature_layers: [final]
+device: cuda

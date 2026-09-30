@@ -1,0 +1,41 @@
+# LONG RUN (recipe = ablation winner R1: question cache + full candidate listing).
+# Qwen3.5-2B, answer-framed branched V3, full-model VeRA, depth attention over 6 layers, context + uncertainty data.
+backbone: configs/backbone_2b.yaml
+model:
+  variant: v3
+  d_model: 512
+  n_heads: 8
+  decision_layers: 4
+  slot_emb: none
+  dropout: 0.1
+  v3_features: branched
+  v3_cross: question
+  v3_row_format: answer
+  v3_lm_feature: true
+  v3_vera_layers: 24          # with scope=all this means every layer
+  v3_vera_scope: all          # state pass + rows
+  v3_vera_rank: 256
+  v3_layer_combine: attn      # per-token depth attention over [4, 8, 12, 16, 20, final]
+  v3_row_checkpoint: true     # recompute option-row chunks in backward
+  v3_question_cache: true     # state -> question + FULL candidate listing -> option suffixes
+  v3_list_cap: 255
+train:
+  data: [data/synthetic/train.jsonl, data/public_train/train.jsonl, data/public_train/injection_train.jsonl,
+         data/public_train/knowledge_train.jsonl, data/public_train/context_train_v1.jsonl, data/synthetic/uncertainty_train.jsonl]
+  data_weights: [0.15, 0.35, 0.15, 0.07, 0.18, 0.10]      # public (intents) upweighted, knowledge down
+  val: [data/synthetic/val.jsonl, data/public_train/val.jsonl, data/public_train/injection_val.jsonl, data/public_train/knowledge_val.jsonl]
+  calib: [data/synthetic/calib.jsonl, data/public_train/calib.jsonl, data/public_train/injection_calib.jsonl, data/public_train/knowledge_calib.jsonl]
+  seed: 0
+  max_steps: 10000
+  lr: 3.0e-4
+  warmup: 200
+  states_per_step: 2          # profiled: step peaks 10-20 GB under the 24 GB cap
+  max_questions_per_state: 6
+  max_state_tokens: 768
+  option_wrap_p: 0.3
+  consistency_weight: 0.5
+  max_train_options: 64
+  tokens_per_microbatch: 2000
+  eval_every: 1000
+  eval_states: 400
+  save_every: 1000

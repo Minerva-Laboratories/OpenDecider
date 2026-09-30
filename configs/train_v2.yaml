@@ -1,0 +1,29 @@
+backbone: configs/backbone.yaml
+model:
+  variant: v2
+  d_model: 512
+  n_heads: 8
+  interaction_layers: 2
+  slot_emb: learned
+  pointer: ptr
+  resampler: 0
+  option_encoding: joint       # joint = spec's [q][o1]..[oK] (order-sensitive by itself); independent = one row per option
+  xattn_layers: full_attention # gated xattn-dense after each full-attention layer = every 4th layer
+  xattn_ff_mult: 2
+  dropout: 0.1
+train:
+  data: data/synthetic/train.jsonl
+  val: data/synthetic/val.jsonl
+  calib: data/synthetic/calib.jsonl
+  seed: 0
+  max_steps: 3000
+  lr: 3.0e-4
+  warmup: 100
+  states_per_step: 8
+  max_questions_per_state: 6
+  max_state_tokens: 768
+  brier_weight: 1.0
+  ordinal_weight: 0.25
+  relevance_weight: 0.1
+  eval_every: 250
+  save_every: 1000

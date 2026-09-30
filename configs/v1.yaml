@@ -1,0 +1,10 @@
+model:
+  variant: v1
+  d_model: 512
+  n_heads: 8
+  decision_layers: 4
+  n_codes: 8
+  slot_emb: learned
+  pointer: ptr
+  resampler: 0            # 0 = off; 256 = Perceiver resampler to 256 latents
+  dropout: 0.1

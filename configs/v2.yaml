@@ -1,0 +1,12 @@
+model:
+  variant: v2
+  d_model: 512
+  n_heads: 8
+  interaction_layers: 2
+  slot_emb: learned
+  pointer: ptr
+  resampler: 0
+  option_encoding: joint       # joint = spec's [q][o1]..[oK] (order-sensitive by itself); independent = one row per option
+  xattn_layers: full_attention # gated xattn-dense after each full-attention layer = every 4th layer
+  xattn_ff_mult: 2
+  dropout: 0.1

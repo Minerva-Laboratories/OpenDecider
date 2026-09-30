@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="OpenDecider"><style>
+.ink{fill:#0f172a} .muted{fill:#64748b} .acc{fill:#2563eb} .line{stroke:#64748b;fill:none}
+.ring{stroke:#64748b;fill:none}
+@media (prefers-color-scheme: dark){.ink{fill:#e2e8f0} .muted{fill:#94a3b8} .acc{fill:#60a5fa}
+.line,.ring{stroke:#94a3b8}}
+</style><path class="line" stroke-width="3.00" stroke-linecap="round" d="M12.00 32.00C32.00 32.00 34.00 12.00 45.00 12.00"/><path class="line" stroke-width="3.00" stroke-linecap="round" d="M12.00 32.00C32.00 32.00 34.00 32.00 45.00 32.00"/><path class="line" stroke-width="3.00" stroke-linecap="round" d="M12.00 32.00C32.00 32.00 34.00 52.00 45.00 52.00"/><circle class="ink" cx="12.00" cy="32.00" r="7.00"/><circle class="ring" stroke-width="3.00" cx="52.00" cy="12.00" r="5.50"/><circle class="acc" cx="52.00" cy="32.00" r="7.00"/><circle class="ring" stroke-width="3.00" cx="52.00" cy="52.00" r="5.50"/></svg>

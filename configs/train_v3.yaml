@@ -1,0 +1,28 @@
+backbone: configs/backbone.yaml
+model:
+  variant: v3
+  d_model: 512
+  n_heads: 8
+  decision_layers: 4          # V3 stack depth
+  slot_emb: none              # membership comes from the same-option attention bias; slots only for the O6 test
+  dropout: 0.1
+  v3_context_update: false    # true = context tokens also attend to options (per question)
+  v3_readout: last            # last | mix (learned mix of all stack layers)
+  text_cache: 200000
+train:
+  data: data/synthetic/train.jsonl
+  val: data/synthetic/val.jsonl
+  calib: data/synthetic/calib.jsonl
+  seed: 0
+  max_steps: 3000
+  lr: 3.0e-4
+  warmup: 100
+  states_per_step: 8
+  max_questions_per_state: 6
+  max_state_tokens: 768
+  brier_weight: 1.0
+  ordinal_weight: 0.25
+  relevance_weight: 0.1
+  eval_every: 250
+  save_every: 1000
+  tokens_per_microbatch: 20000   # V3: no backbone grads; option-token attention is (K*L)^2

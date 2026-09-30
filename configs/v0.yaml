@@ -1,0 +1,7 @@
+model:
+  variant: v0
+  d_model: 512
+  slot_emb: none          # V0 already sees option order through the causal sequence
+  pointer: ptr
+  dropout: 0.1
+  v0_prefix_cache: true
