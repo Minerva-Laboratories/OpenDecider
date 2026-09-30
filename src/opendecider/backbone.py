@@ -16,7 +16,7 @@ import torch
 import torch.nn as nn
 import yaml
 
-from .quant import Int8Embedding, Int8Tensor, kv_mode, materialize, maybe_quantize, quantize_int8_
+from .quant import Int8Embedding, Int8Linear, Int8Tensor, kv_mode, materialize, maybe_quantize, quantize_int8_
 
 
 @dataclass
@@ -55,9 +55,11 @@ class StateMemory:
 
 
 class Backbone(nn.Module):
-    def __init__(self, lm: nn.Module, tokenizer, cfg: BackboneConfig):
+    def __init__(self, lm: nn.Module, tokenizer, cfg: BackboneConfig, lm_head: nn.Module | None = None):
         super().__init__()
         self.lm = lm                      # the *text model* (embed_tokens, layers, norm)
+        # LM head for log-prob features and /v1/explain: None when tied to embed_tokens (0.8B, 2B); the 9B is untied
+        self.lm_head = lm_head
         self.tok = tokenizer
         self.cfg = cfg
         self.lm.requires_grad_(False)
@@ -78,17 +80,55 @@ class Backbone(nn.Module):
             kw["quantization_config"] = BitsAndBytesConfig(
                 load_in_4bit=True, bnb_4bit_quant_type="nf4", bnb_4bit_use_double_quant=True,
                 bnb_4bit_compute_dtype=dtype)
+        if cfg.path.endswith(".gguf"):                        # llama.cpp quantized weights (see gguf_load.py)
+            from .gguf_load import load_qwen35_gguf
+            d = os.path.dirname(cfg.path)
+            lm, head = load_qwen35_gguf(cfg.path, d, cfg.device, dtype, cfg.weight_quant)
+            return cls(lm, AutoTokenizer.from_pretrained(d), cfg, head)
         src, rev = (cfg.path, None) if os.path.isdir(cfg.path) else (cfg.repo_id, cfg.revision)
         tok = AutoTokenizer.from_pretrained(src, revision=rev)
         full = AutoModelForCausalLM.from_pretrained(src, revision=rev, dtype=dtype, device_map=cfg.device, **kw)
         lm = full.model
-        del full.lm_head      # tied to embeddings; we never produce tokens
+        head = None
+        if not getattr(full.config, "tie_word_embeddings", True):   # untied (9B): keep the real LM head
+            head = Int8Linear(full.lm_head) if cfg.weight_quant in ("int8", "nf4") else full.lm_head
+        del full.lm_head
         if cfg.weight_quant == "int8":
             quantize_int8_(lm.layers)
         if cfg.weight_quant in ("int8", "nf4"):   # bitsandbytes has no 4-bit embedding: the table is int8 either way
             lm.embed_tokens = Int8Embedding(lm.embed_tokens)
             torch.cuda.empty_cache()
-        return cls(lm, tok, cfg)
+        return cls(lm, tok, cfg, head)
+
+    # ------------------------------------------------------------------ LM head (log-prob features, explanations)
+    def _head_rows(self):
+        """(int8 rows, per-row scale) or (weight, None) of the LM head: lm_head if untied, else embed_tokens."""
+        m = self.lm_head if self.lm_head is not None else self.lm.embed_tokens
+        q = getattr(m, "qweight", None)
+        return (q, m.scale) if q is not None else (m.weight, None)
+
+    @torch.no_grad()
+    def head_logits(self, h: torch.Tensor, chunk: int = 32768) -> torch.Tensor:
+        """Full-vocabulary logits h @ Wᵀ, reading the (int8) head in chunks; no full-precision copy is kept."""
+        W, sc = self._head_rows()
+        hb = h.to(torch.bfloat16)
+        parts = []
+        for a in range(0, W.shape[0], chunk):
+            Wc = W[a:a + chunk].to(torch.bfloat16) * (sc[a:a + chunk].to(torch.bfloat16) if sc is not None else 1)
+            parts.append((hb @ Wc.t()).float())
+        return torch.cat(parts, -1)
+
+    @torch.no_grad()
+    def token_logprob(self, h: torch.Tensor, tok: torch.Tensor, chunk: int = 32768) -> torch.Tensor:
+        """log softmax(h @ Wᵀ)[tok], normaliser by chunked log-sum-exp (never materializes n × vocab at once)."""
+        W, sc = self._head_rows()
+        hb = h.to(torch.bfloat16)
+        lse = torch.full((h.shape[0],), -float("inf"), device=h.device)
+        for a in range(0, W.shape[0], chunk):
+            Wc = W[a:a + chunk].to(torch.bfloat16) * (sc[a:a + chunk].to(torch.bfloat16) if sc is not None else 1)
+            lse = torch.logaddexp(lse, torch.logsumexp((hb @ Wc.t()).float(), dim=-1))
+        rows = W[tok].float() * (sc[tok].float() if sc is not None else 1)
+        return (h.float() * rows).sum(-1) - lse
 
     # ------------------------------------------------------------------ tokenization
     def tokenize(self, texts: Sequence[str]) -> list[list[int]]:

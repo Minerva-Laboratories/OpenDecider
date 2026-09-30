@@ -492,21 +492,9 @@ class V3(DecisionModel):
             s_flat = None if sh is None else self._wide(sh)[smask]
         return s_flat, smask.sum(1).cpu(), q_flat, lq, o_flat, lo
 
-    @torch.no_grad()
-    def _token_logprob(self, h: torch.Tensor, tok: torch.Tensor, chunk: int = 32768) -> torch.Tensor:
-        """log softmax(h @ Eᵀ)[tok] with the tied embedding table E, normaliser by chunked log-sum-exp. Reads the
-        table in place (int8 rows dequantised one chunk at a time; no full-precision copy is kept). Fixed feature."""
-        emb = self.backbone.lm.embed_tokens
-        q, sc = getattr(emb, "qweight", None), getattr(emb, "scale", None)
-        W = None if q is not None else emb.weight
-        hb = h.to(torch.bfloat16)
-        lse = torch.full((h.shape[0],), -float("inf"), device=h.device)
-        V = (q if q is not None else W).shape[0]
-        for a in range(0, V, chunk):
-            Ec = (q[a:a + chunk].to(torch.bfloat16) * sc[a:a + chunk].to(torch.bfloat16)) if q is not None \
-                else W[a:a + chunk].to(torch.bfloat16)
-            lse = torch.logaddexp(lse, torch.logsumexp((hb @ Ec.t()).float(), dim=-1))
-        return (h.float() * emb(tok).float()).sum(-1) - lse
+    def _token_logprob(self, h: torch.Tensor, tok: torch.Tensor) -> torch.Tensor:
+        """Log-prob of tok under the frozen LM head (tied embeddings or the untied head). Fixed feature."""
+        return self.backbone.token_logprob(h, tok)
 
     def _question_conditioned_feats(self, questions, mem, pc, smask, sh):
         """Rows are ONLY [question ... Answer:] continuing from the state cache (binding happens in the LLM);
