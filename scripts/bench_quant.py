@@ -2,10 +2,11 @@
 
     .venv/bin/python scripts/bench_quant.py --ckpt runs/x2b/model.pt [--configs int8:int8 nf4:int4] [--cases 100]
 
-Each config is "weights:cache": weights int8 | nf4 (bitsandbytes 4-bit; embeddings stay int8), cache int8 | int4
+Each config is "weights:cache[:graphs]": weights int8 | nf4 (bitsandbytes) | w8 | w4 (GemLite Triton GEMMs), cache
+int8 | int4, ":graphs" = CUDA-graph engine (src/opendecider/deploy.py). Embeddings stay int8
 (every cached K/V and the state memory; GDN recurrent state stays bf16/fp32). Per config:
   memory  : GPU memory after load, and peak during one decide() for states of about 0.9k / 3.9k / 15k tokens
-  latency : decide() wall time for the same states (prefix cache off, after a warm-up call)
+  latency : decide() wall time for the same states (prefix cache off; median of 3 after a warm-up call per size)
   accuracy: typed-decisions test (first --cases cases, 5 questions each; argmax vs gold argmax, KL, Brier vs gold)
             and the public Banking77 8-way and prompt-injection sets (accuracy)
 The model weights were trained with int8 weights and cache; nothing is retrained.
@@ -79,21 +80,31 @@ def main():
     out = {}
     with gpu_lock("bench_quant"):
         for c in a.configs:
-            w, kv = c.split(":")
+            w, kv, *mode = c.split(":")
+            graphs = mode == ["graphs"]
             torch.cuda.empty_cache(); torch.cuda.reset_peak_memory_stats()
             bb = Backbone.load(BackboneConfig(**{**ck["backbone_cfg"], "weight_quant": w, "kv_quant": kv}))
             model, extra = load_model(a.ckpt, backbone=bb)
             dec = Decider(model, extra.get("temperature", 1.0), extra.get("temperature_by_type"))
+            if graphs:
+                from opendecider.deploy import GraphEngine
+                dec.engine = GraphEngine(model).install()
             torch.cuda.synchronize()
             res = {"weights_gb": torch.cuda.memory_allocated() / GB}
             dec.decide({"state": state(5, 1), "questions": QS})                      # warm-up
             for n in (20, 100, 400):
-                torch.cuda.reset_peak_memory_stats(); torch.cuda.synchronize()
-                t = time.perf_counter(); o = dec.decide({"state": state(n, n), "questions": QS})
-                torch.cuda.synchronize()
+                req = {"state": state(n, n), "questions": QS}
+                dec.decide(req)                                                  # warm-up (captures graphs)
+                torch.cuda.reset_peak_memory_stats()
+                lat = []
+                for _ in range(3):
+                    torch.cuda.synchronize(); t = time.perf_counter(); o = dec.decide(req)
+                    torch.cuda.synchronize(); lat.append(time.perf_counter() - t)
                 res[f"tokens_{n}"] = o["input_tokens"]
                 res[f"peak_gb_{n}"] = torch.cuda.max_memory_allocated() / GB
-                res[f"latency_s_{n}"] = time.perf_counter() - t
+                res[f"latency_s_{n}"] = float(np.median(lat))
+            if graphs:
+                res["graph_stats"] = dict(dec.engine.stats)
             with torch.no_grad():                                                   # stored state cache, 15k tokens
                 pc, _ = bb.prefix_cache_batch(bb.tokenize([record_state_text({"state": state(400, 400), "questions": []})]))
                 res["state_cache_mb_400"] = pc.nbytes() / 2 ** 20

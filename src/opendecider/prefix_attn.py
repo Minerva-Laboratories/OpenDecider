@@ -58,9 +58,11 @@ def _forward(mod, ctx, hidden_states, position_embeddings, attention_mask=None, 
     kpos = torch.arange(t, device=dev).repeat(rmax)
     for s in ctx["states"]:                                                    # few states (1 at inference)
         r = ctx["rows_of"][s]
-        off = ctx["pad"][s]                                                    # left padding of this state's prefix
-        Kps, Vps = Kp[s][:, off:], Vp[s][:, off:]                              # (Hkv, T_s, D): real prefix only
-        Ts = T - off
+        if ctx.get("static"):                  # CUDA graphs: fixed shapes, prefix pads masked instead of sliced
+            Kps, Vps, Ts, pm = Kp[s], Vp[s], T, ctx["pmask"][s]
+        else:
+            off = ctx["pad"][s]                                                # left padding of this state's prefix
+            Kps, Vps, Ts, pm = Kp[s][:, off:], Vp[s][:, off:], T - off, None   # (Hkv, T_s, D): real prefix only
         # rows in groups so the boolean mask (queries x keys) stays under MASK_ELEMS
         per = max(1, MASK_ELEMS // (g * t * (Ts + t)))
         for a in range(0, r.numel(), per):
@@ -76,7 +78,9 @@ def _forward(mod, ctx, hidden_states, position_embeddings, attention_mask=None, 
             qrow = torch.arange(n, device=dev).view(1, n, 1).expand(g, n, t).reshape(-1)
             qpos = torch.arange(t, device=dev).view(1, 1, t).expand(g, n, t).reshape(-1)
             own = (qrow[:, None] == krow[:n * t][None]) & (kpos[:n * t][None] <= qpos[:, None])
-            mask = torch.cat([torch.ones(own.shape[0], Ts, dtype=torch.bool, device=dev), own], 1)
+            pre = pm.view(1, Ts).expand(own.shape[0], Ts) if pm is not None else \
+                torch.ones(own.shape[0], Ts, dtype=torch.bool, device=dev)
+            mask = torch.cat([pre, own], 1)
             with _kernels(dev):
                 o = F.scaled_dot_product_attention(Q, K, V, attn_mask=mask[None, None], scale=mod.scaling)
             out[rr] = o.view(Hkv, g, n, t, D).permute(2, 0, 1, 3, 4)
@@ -86,18 +90,22 @@ def _forward(mod, ctx, hidden_states, position_embeddings, attention_mask=None, 
 
 
 @contextlib.contextmanager
-def shared_prefix_attention(bb, pc, rows: torch.Tensor, pmask: torch.Tensor):
+def shared_prefix_attention(bb, pc, rows: torch.Tensor, pmask: torch.Tensor, static: bool = False):
     """While active, full-attention layers attend to pc's per-state K/V (dequantized once) for rows `rows`
-    (row i reads state rows[i]); pmask (S, T) marks real prefix tokens."""
+    (row i reads state rows[i]); pmask (S, T) marks real prefix tokens. static=True (CUDA graphs): shapes stay fixed,
+    prefix pads are masked instead of sliced, and nothing is read back to the host."""
     kv = {}
     for li, _ in _attn_modules(bb):
         K = materialize(pc.tensors[(li, "keys", None)]).to(bb.dtype)
         V = materialize(pc.tensors[(li, "values", None)]).to(bb.dtype)
         kv[li] = (K, V)
-    states = torch.unique(rows).tolist()
-    rows_of = {s: (rows == s).nonzero().squeeze(1) for s in states}
-    pad = (~pmask.bool()).sum(1).tolist()                                     # prefixes are LEFT-padded
-    ctx = {"kv": kv, "pad": pad, "states": states, "rows_of": rows_of,
+    if static:                                                                # one state, every row reads it
+        states, rows_of, pad = [0], {0: torch.arange(rows.numel(), device=rows.device)}, None
+    else:
+        states = torch.unique(rows).tolist()
+        rows_of = {s: (rows == s).nonzero().squeeze(1) for s in states}
+        pad = (~pmask.bool()).sum(1).tolist()                                 # prefixes are LEFT-padded
+    ctx = {"kv": kv, "pad": pad, "pmask": pmask.bool(), "states": states, "rows_of": rows_of, "static": static,
            "rows_of_max": max(int(v.numel()) for v in rows_of.values())}
     mods = _attn_modules(bb)
     for _, m in mods:

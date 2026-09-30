@@ -16,7 +16,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from .quant import Int8Embedding, Int8Linear, quantize_int8_
+from .quant import Int8Embedding, Int8Linear, gemlite_quantize_, quantize_int8_
 
 
 def _reorder_v_heads(t: torch.Tensor, dim: int, n_a: int, n_b: int, head: int) -> torch.Tensor:
@@ -117,12 +117,14 @@ def load_qwen35_gguf(gguf_path: str, config_dir: str, device: str = "cuda", dtyp
                 p.copy_(x.to(p.dtype))
 
     fill(lm.embed_tokens, "embed_tokens.")
-    if weight_quant in ("int8", "nf4"):
+    if weight_quant != "none":
         lm.embed_tokens = Int8Embedding(lm.embed_tokens)
     for i, layer in enumerate(lm.layers):                     # one layer in bf16 at a time
         fill(layer, f"layers.{i}.")
         if weight_quant == "int8":
             quantize_int8_(layer)
+        elif weight_quant in ("w4", "w8"):
+            gemlite_quantize_(layer, 4 if weight_quant == "w4" else 8)
         torch.cuda.empty_cache()
     fill(lm.norm, "norm.")
     # non-persistent buffers (rotary inv_freq) are recomputed from the config
@@ -133,7 +135,7 @@ def load_qwen35_gguf(gguf_path: str, config_dir: str, device: str = "cuda", dtyp
         head = nn.Linear(c.hidden_size, c.vocab_size, bias=False, device="meta")
         head.weight = nn.Parameter(W.to(device=device, dtype=dtype), requires_grad=False)
         del W
-        if weight_quant in ("int8", "nf4"):
+        if weight_quant != "none":
             head = Int8Linear(head)
         torch.cuda.empty_cache()
     return lm.eval(), head

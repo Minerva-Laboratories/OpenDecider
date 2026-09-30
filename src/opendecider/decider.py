@@ -33,6 +33,10 @@ class Decider:
     def __init__(self, model: DecisionModel, temperature: float = 1.0, temperature_by_type: dict | None = None,
                  profiles_dir: str = "runs/profiles"):
         self.model = model.eval()
+        if os.environ.get("OPENDECIDER_CUDA_GRAPHS") == "1" and torch.cuda.is_available() and \
+                getattr(model, "state_free", False):
+            from .deploy import GraphEngine
+            self.engine = GraphEngine(model).install()
         self.temperature = temperature
         self.temperature_by_type = temperature_by_type or {}
         self.profiles_dir = profiles_dir

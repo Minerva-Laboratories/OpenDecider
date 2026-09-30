@@ -16,7 +16,8 @@ import torch
 import torch.nn as nn
 import yaml
 
-from .quant import Int8Embedding, Int8Linear, Int8Tensor, kv_mode, materialize, maybe_quantize, quantize_int8_
+from .quant import (Int8Embedding, Int8Linear, Int8Tensor, gemlite_quantize_, kv_mode, materialize, maybe_quantize,
+                    quantize_int8_)
 
 
 @dataclass
@@ -25,7 +26,7 @@ class BackboneConfig:
     repo_id: str = "Qwen/Qwen3.5-0.8B"
     revision: str = "2fc06364715b967f1860aea9cf38778875588b17"
     dtype: str = "bfloat16"
-    weight_quant: str = "int8"          # none | int8 | nf4 (bitsandbytes 4-bit; embeddings stay int8)
+    weight_quant: str = "int8"          # none | int8 | nf4 (bitsandbytes) | w4 | w8 (GemLite Triton GEMMs); embeddings int8
     kv_quant: str = "int8"              # none | int8 | int4  (all cached K/V and state memory)
     quantize_linear_state: bool = False  # GDN recurrent/conv state (not a KV cache)
     feature_layers: list = field(default_factory=lambda: ["final"])  # "final" = post-norm last layer, or ints 1..L
@@ -91,11 +92,13 @@ class Backbone(nn.Module):
         lm = full.model
         head = None
         if not getattr(full.config, "tie_word_embeddings", True):   # untied (9B): keep the real LM head
-            head = Int8Linear(full.lm_head) if cfg.weight_quant in ("int8", "nf4") else full.lm_head
+            head = Int8Linear(full.lm_head) if cfg.weight_quant != "none" else full.lm_head
         del full.lm_head
         if cfg.weight_quant == "int8":
             quantize_int8_(lm.layers)
-        if cfg.weight_quant in ("int8", "nf4"):   # bitsandbytes has no 4-bit embedding: the table is int8 either way
+        if cfg.weight_quant in ("w4", "w8"):      # low-bit weights on Triton GEMM kernels (GemLite)
+            gemlite_quantize_(lm.layers, 4 if cfg.weight_quant == "w4" else 8)
+        if cfg.weight_quant in ("int8", "nf4", "w4", "w8"):   # the embedding table is int8 in every quantized mode
             lm.embed_tokens = Int8Embedding(lm.embed_tokens)
             torch.cuda.empty_cache()
         return cls(lm, tok, cfg, head)

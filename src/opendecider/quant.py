@@ -175,3 +175,35 @@ def quantize_int8_(module: nn.Module, skip: tuple[str, ...] = ()) -> nn.Module:
         else:
             quantize_int8_(child, skip)
     return module
+
+
+# ---------------------------------------------------------------- low-bit weights with Triton GEMMs (GemLite)
+def gemlite_linear(lin: nn.Linear, bits: int, group: int = 64) -> nn.Module:
+    """nn.Linear -> GemLiteLinear (A16W{bits}): asymmetric per-group weights, Triton GEMM kernels (native on sm_87).
+    bits=8 uses one group per row (per-channel)."""
+    from gemlite import DType, GemLiteLinear
+    W = lin.weight.data.float()
+    N, K = W.shape
+    g = group if bits < 8 else K
+    Wg = W.view(N, K // g, g)
+    mn, mx = Wg.amin(-1, keepdim=True), Wg.amax(-1, keepdim=True)
+    s = (mx - mn).clamp_min(1e-8) / (2 ** bits - 1)
+    z = -mn / s
+    Wq = torch.round(Wg / s + z).clamp_(0, 2 ** bits - 1).to(torch.uint8).view(N, K)
+    dt = DType.BF16 if lin.weight.dtype == torch.bfloat16 else DType.FP16
+    out = GemLiteLinear(W_nbits=bits, group_size=g, in_features=K, out_features=N, input_dtype=dt, output_dtype=dt)
+    out.pack(Wq, s.view(N, -1).to(lin.weight.dtype), z.view(N, -1).to(lin.weight.dtype),
+             bias=None if lin.bias is None else lin.bias.data)
+    out.in_features, out.out_features = K, N
+    return out
+
+
+def gemlite_quantize_(module: nn.Module, bits: int, group: int = 64) -> nn.Module:
+    """Replace every nn.Linear under `module` in place with a GemLite A16W{bits} layer."""
+    for name, child in list(module.named_children()):
+        if isinstance(child, nn.Linear):
+            setattr(module, name, gemlite_linear(child, bits, group))
+            del child
+        else:
+            gemlite_quantize_(child, bits, group)
+    return module

@@ -375,3 +375,34 @@ def test_shared_prefix_fused_kernel_on_gpu():
                 _, o = m.run(qs, m.encode_states(states))
             out[shared] = torch.softmax(o.logits.float(), -1)
         assert (out[False] - out[True]).abs().max() < 2e-2                  # bf16 kernels differ in rounding only
+
+
+@pytest.mark.gpu
+def test_graph_engine_matches_eager_on_gpu():
+    """CUDA-graph engine (bucketed state and row passes) gives the same decisions as eager."""
+    import os
+    import torch
+    from opendecider.decider import Decider
+    from tiny import tiny_backbone
+    if not torch.cuda.is_available():
+        pytest.skip("needs CUDA")
+    from opendecider.deploy import GraphEngine
+    from opendecider.guards import gpu_lock
+    os.environ["OPENDECIDER_STATE_CACHE_MB"] = "0"
+    with gpu_lock("test_graph_engine"):
+        bb = tiny_backbone(layers=(4, "final"), kv_quant="int8", dtype="bfloat16")
+        bb.lm.to("cuda"); bb.cfg.device = "cuda"
+        m = make(bb, "v3", v3_features="branched", v3_row_format="answer", slot_emb="none",
+                 v3_cross="question").to("cuda")
+        d = Decider(m)
+        reqs = [{"state": {"msg": "charged twice " * k}, "questions": {
+            "a": {"type": "choice", "prompt": "Which team?", "options": ["billing", "technical", "refund"]},
+            "u": {"type": "noul", "prompt": "Urgent?"}}} for k in (1, 30)]
+        eager = [d.decide(r) for r in reqs]
+        eng = GraphEngine(m).install()
+        graph = [d.decide(r) for r in reqs]
+        assert eng.stats["state_graph"] == 2 and eng.stats["rows_graph"] >= 2
+        for a, b in zip(eager, graph):
+            for k in a["answers"]:
+                pa, pb = torch.tensor(a["answers"][k]["probs_list"]), torch.tensor(b["answers"][k]["probs_list"])
+                assert (pa - pb).abs().max() < 3e-2
