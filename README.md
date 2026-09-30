@@ -82,6 +82,11 @@ Full tables: [`docs/RESULTS.md`](docs/RESULTS.md).
 Leaderboard rows are self-reported on the dataset card (read 2026-09-28). Specialist models trained on the benchmark's
 own train split score higher (Verdict 2.0: 0.771, Laya: 0.766).
 
+The gold labels come from a teacher model, so accuracy measures agreement with that teacher, not correctness. The
+dataset card gives two ceilings: 0.704 for a model fitted to the factors that generated each case ("perfect scenario
+understanding") and 0.735 for the teacher agreeing with itself. It reads about 0.75 as saturation: scores above it
+mostly reflect the teacher's quirks.
+
 ### Public benchmarks
 
 <p align="center"><img src="docs/img/public_benchmarks.png" alt="public benchmark accuracy" width="760"></p>

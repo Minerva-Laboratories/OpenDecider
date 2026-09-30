@@ -32,7 +32,11 @@ for yi, r in zip(y, rows):
     ax.text(r[1] + 0.006, yi, lab, va="center", fontsize=7.6, color=INK)
 ax.set_yticks(y); ax.set_yticklabels([r[0] for r in rows], fontsize=7.8)
 ax.set_xlim(0.4, 0.86); ax.set_xlabel("typed-decisions accuracy vs teacher gold (400 cases, 2,000 decisions)")
-ax.axvline(0.75, color=INK2, lw=1, ls=(0, (3, 2))); ax.text(0.752, len(rows) - 0.6, "saturation ≈ 0.75", fontsize=7, color=INK2)
+# reference points from the dataset card (rev f7a2487edd7a): gold = mean of 3 samples from a ~4B teacher
+ax.axvline(0.704, color=INK2, lw=1, ls=(0, (1, 2)))
+ax.text(0.702, len(rows) - 0.6, "task ceiling 0.704", fontsize=7, color=INK2, ha="right")
+ax.axvline(0.735, color=INK2, lw=1, ls=(0, (3, 2)))
+ax.text(0.737, len(rows) - 0.6, "teacher self-agreement 0.735", fontsize=7, color=INK2)
 ax.grid(axis="y", visible=False)
 fig.savefig("docs/img/typed_decisions.png"); plt.close(fig)
 
