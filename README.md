@@ -37,7 +37,6 @@ state + { route: choice[billing, technical, refund, other], urgent: noul, severi
 - [Requirements](#requirements)
 - [Quickstart](#quickstart)
 - [API](#api)
-- [When to use something else](#when-to-use-something-else)
 - [Limitations](#limitations)
 - [Roadmap](#roadmap)
 - [Reproduce](#reproduce)
@@ -261,15 +260,6 @@ Environment variables:
 | `OPENDECIDER_NONE_TEXT` | `none of the above` | Text of the `none` option. Empty turns it off. |
 | `HOST`, `PORT` | `127.0.0.1`, `8000` | Bind address. |
 
-## When to use something else
-
-| Need | Better fit |
-|---|---|
-| Under 20 ms per question on one fixed task, with labeled data | A fine-tuned encoder (Laya, Von, Verdict). |
-| A 27B+ model is already served and you only need the argmax | A letter-logit wrapper (open-alternative-jev, Featherless). |
-
-A map of about 60 open and commercial alternatives is in [`docs/LANDSCAPE.md`](docs/LANDSCAPE.md).
-
 ## Limitations
 
 - Accuracy trails Jev and Decider 1 on typed-decisions.
@@ -331,7 +321,8 @@ tests/             CPU unit tests (tiny random Qwen3.5-architecture model)
 ## Background
 
 OpenDecider builds on Pointer Networks, Poly-encoders, Perceiver, Flamingo, iTransformer and RLCR, and on the Qwen3.5
-open weights. Jev is a product of TypeSafe. This project is not affiliated with TypeSafe.
+open weights. A survey of related open and commercial projects is in [`docs/LANDSCAPE.md`](docs/LANDSCAPE.md).
+Jev is a product of TypeSafe. This project is not affiliated with TypeSafe.
 
 ## License
 

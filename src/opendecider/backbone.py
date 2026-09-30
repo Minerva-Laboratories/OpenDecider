@@ -29,6 +29,8 @@ class BackboneConfig:
     kv_quant: str = "int8"              # none | int8 | int4  (all cached K/V and state memory)
     quantize_linear_state: bool = False  # GDN recurrent/conv state (not a KV cache)
     feature_layers: list = field(default_factory=lambda: ["final"])  # "final" = post-norm last layer, or ints 1..L
+    prefill_chunk: int = 0              # state pass in chunks of this many tokens; 0 = one pass (measured: no peak
+                                        # memory gain on the Orin, +34% latency at 15k tokens)
     device: str = "cuda"
 
     @classmethod
@@ -181,6 +183,23 @@ class Backbone(nn.Module):
         f, _ = self.forward(ids, mask, self.cfg.feature_layers)
         return f
 
+    def prefill(self, ids, mask, layers=("final",), cache=None, keep_hidden: bool = True):
+        """Forward over (B, T) in chunks of cfg.prefill_chunk tokens, each continuing the cache: same result as one
+        pass (exact up to float error), but activation memory is bounded by the chunk, not by T.
+        Returns (hidden features over all T, or None if not keep_hidden; cache)."""
+        C = self.cfg.prefill_chunk or ids.shape[1]
+        feats = []
+        past = cache.get_seq_length() if cache is not None else 0
+        pmask = torch.ones(ids.shape[0], past, dtype=torch.bool, device=mask.device) if past else None
+        for a in range(0, ids.shape[1], C):
+            b = min(a + C, ids.shape[1])
+            f, cache = self.forward(ids[:, a:b], mask[:, a:b], layers, past_key_values=cache, use_cache=True,
+                                    past_mask=pmask)
+            pmask = mask[:, :b] if pmask is None else torch.cat([pmask, mask[:, a:b]], 1)
+            if keep_hidden:
+                feats.append(f)
+        return (torch.cat(feats, -2) if keep_hidden else None), cache
+
     # ------------------------------------------------------------------ prefix cache (V0)
     def prefix_cache_batch(self, seqs: Sequence[Sequence[int]], return_hidden: bool = False, grad: bool = False,
                            quantize: bool | None = None):
@@ -195,7 +214,11 @@ class Backbone(nn.Module):
         # grad=True (training with adapters on the state pass): keep the graph and do NOT quantise the cache, so
         # gradients flow from the question/option rows back through the cached K/V and GDN states.
         with torch.set_grad_enabled(grad):
-            f, cache = self.forward(ids, mask, self.cfg.feature_layers if return_hidden else ("final",), use_cache=True)
+            layers = self.cfg.feature_layers if return_hidden else ("final",)
+            if grad:                                            # training graph: one pass (chunking saves nothing)
+                f, cache = self.forward(ids, mask, layers, use_cache=True)
+            else:
+                f, cache = self.prefill(ids, mask, layers, keep_hidden=return_hidden)
         q = (not grad) if quantize is None else quantize          # quantize=False: exact values without a graph
         pc = PackedCache.pack(cache, kv_int8=q and kv_mode(self.cfg),
                               state_int8=self.cfg.quantize_linear_state and q)

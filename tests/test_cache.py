@@ -29,3 +29,20 @@ def test_token_cache_roundtrip_and_growth():
     assert lens.tolist() == [1, 3, 5, 3]
     ref = torch.cat([f[2, :1], f[0, :3], f[1, :5], f[0, :3]])
     assert (flat - ref).abs().max() <= ref.abs().amax() / 127 + 1e-6
+
+
+def test_chunked_prefill_matches_one_pass():
+    import torch
+    from opendecider.batching import state_texts
+    from tiny import tiny_backbone
+    bb = tiny_backbone(kv_quant="none", layers=(4, "final"))
+    seqs = bb.tokenize(state_texts(["a longer state " * 30, "short state"]))
+    out = {}
+    for chunk in (0, 7):
+        bb.cfg.prefill_chunk = chunk
+        pc, mask, f = bb.prefix_cache_batch(seqs, return_hidden=True)
+        out[chunk] = (pc, mask, f)
+    (pa, ma, fa), (pb, mb, fb) = out[0], out[7]
+    assert torch.equal(ma, mb) and torch.allclose(fa[:, ma], fb[:, mb], atol=1e-4)
+    for k, t in pa.tensors.items():
+        assert torch.allclose(t, pb.tensors[k], atol=1e-4), k

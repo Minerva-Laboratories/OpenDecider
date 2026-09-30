@@ -317,14 +317,19 @@ def test_shared_prefix_attention_matches_per_row_copies():
           Question("Urgent?", ["yes", "no"], "noul", state_idx=1),
           Question("Severity?", ["low", "medium", "high", "critical"], "score", state_idx=0)]
     states = ["State:\n{\"msg\": \"charged twice for my order\"}\n", "State:\n{\"msg\": \"hi\", \"n\": [1, 2, 3, 4, 5]}\n"]
+    import opendecider.prefix_attn as pa
     out = {}
-    for shared in (False, True):
+    for shared, block in ((False, 0), (True, 1 << 25), (True, 1)):         # 1: one row per SDPA call
+        pa.MASK_ELEMS = block or pa.MASK_ELEMS
         m = make(bb, "v3", v3_features="branched", v3_row_format="answer", slot_emb="none", v3_cross="question",
                  v3_shared_prefix=shared, v3_branch_chunk=3)
         with torch.no_grad():
             _, o = m.run(qs, m.encode_states(states))
-        out[shared] = o.logits
-    assert torch.allclose(out[False], out[True], atol=1e-4), (out[False] - out[True]).abs().max()
+        out[(shared, block)] = o.logits
+    pa.MASK_ELEMS = 1 << 25
+    ref = out[(False, 0)]
+    for key in ((True, 1 << 25), (True, 1)):
+        assert torch.allclose(ref, out[key], atol=1e-4), (key, (ref - out[key]).abs().max())
 
 
 def test_state_free_trunk_matches_full_context():
@@ -344,3 +349,29 @@ def test_state_free_trunk_matches_full_context():
         m.state_free = False                                        # old path: state features built, then masked
         _, b = m.run(qs, m.encode_states(states))
     assert torch.allclose(a.logits, b.logits, atol=1e-5), (a.logits - b.logits).abs().max()
+
+
+@pytest.mark.gpu
+def test_shared_prefix_fused_kernel_on_gpu():
+    """On CUDA the shared-prefix path must run on the fused memory-efficient SDPA kernel (never the math kernel)
+    and match the per-row-copy path."""
+    import torch
+    from opendecider.batching import Question
+    from tiny import tiny_backbone
+    if not torch.cuda.is_available():
+        pytest.skip("needs CUDA")
+    from opendecider.guards import gpu_lock
+    with gpu_lock("test_shared_prefix_fused"):
+        bb = tiny_backbone(layers=(4, "final"), kv_quant="none", dtype="bfloat16")
+        bb.lm.to("cuda"); bb.cfg.device = "cuda"
+        qs = [Question("Which team?", ["billing", "technical support", "refund"], "choice", state_idx=0),
+              Question("Urgent?", ["yes", "no"], "noul", state_idx=1)]
+        states = ["State:\n{\"msg\": \"charged twice for my order\"}\n" * 20, "State:\n{\"msg\": \"hi\"}\n"]
+        out = {}
+        for shared in (False, True):
+            m = make(bb, "v3", v3_features="branched", v3_row_format="answer", slot_emb="none", v3_cross="question",
+                     v3_shared_prefix=shared).to("cuda")
+            with torch.no_grad():
+                _, o = m.run(qs, m.encode_states(states))
+            out[shared] = torch.softmax(o.logits.float(), -1)
+        assert (out[False] - out[True]).abs().max() < 2e-2                  # bf16 kernels differ in rounding only

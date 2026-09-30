@@ -151,8 +151,8 @@ class PrefixCache:
     def _run(self, ids, cache, ctx):
         x = torch.tensor([ids], dtype=torch.long, device=self.bb.device)
         with ctx():
-            _, cache = self.bb(x, torch.ones_like(x, dtype=torch.bool), ("final",), past_key_values=cache,
-                               use_cache=True)
+            _, cache = self.bb.prefill(x, torch.ones_like(x, dtype=torch.bool), ("final",), cache=cache,
+                                       keep_hidden=False)
         return cache
 
     def _set_template(self, cache):
