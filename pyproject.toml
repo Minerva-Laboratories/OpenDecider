@@ -3,6 +3,8 @@ name = "opendecider"
 version = "0.1.0"
 description = "Open, speculative reconstruction of a System-One decision model (hypothesis test; not TypeSafe's code)."
 requires-python = ">=3.12"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
 dependencies = ["torch>=2.10", "transformers>=5.2", "pyyaml", "numpy", "fastapi", "uvicorn", "pydantic>=2"]
 
 [project.optional-dependencies]

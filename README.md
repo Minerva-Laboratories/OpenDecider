@@ -11,6 +11,7 @@
   <img alt="python" src="https://img.shields.io/badge/python-3.12-3776ab">
   <img alt="pytorch" src="https://img.shields.io/badge/pytorch-2.10%2B-ee4c2c">
   <img alt="backbone" src="https://img.shields.io/badge/backbone-Qwen3.5%202B%20%7C%209B-6f42c1">
+  <img alt="license" src="https://img.shields.io/badge/license-Apache--2.0-blue">
   <img alt="status" src="https://img.shields.io/badge/status-research-lightgrey">
 </p>
 
@@ -40,6 +41,7 @@ state + { route: choice[billing, technical, refund, other], urgent: noul, severi
 - [Roadmap](#roadmap)
 - [Reproduce](#reproduce)
 - [Project layout](#project-layout)
+- [License](#license)
 
 ## Features
 
@@ -255,3 +257,8 @@ tests/             CPU unit tests (tiny random Qwen3.5-architecture model)
 
 OpenDecider builds on Pointer Networks, Poly-encoders, Perceiver, Flamingo, iTransformer and RLCR, and on the Qwen3.5
 open weights. Jev is a product of TypeSafe. This project is not affiliated with TypeSafe.
+
+## License
+
+Code: [Apache-2.0](LICENSE). See [`NOTICE`](NOTICE).
+Backbone weights and datasets keep their own licenses. See [`data/MANIFEST.md`](data/MANIFEST.md).

@@ -17,3 +17,4 @@ data/typed_decisions/
 
 # local assistant instructions (the spec is docs/SPEC.md)
 CLAUDE.md
+*.egg-info/
