@@ -87,6 +87,12 @@ dataset card gives two ceilings: 0.704 for a model fitted to the factors that ge
 understanding") and 0.735 for the teacher agreeing with itself. It reads about 0.75 as saturation: scores above it
 mostly reflect the teacher's quirks.
 
+We do not train on the typed-decisions train split. Its labels are the outputs of a ~4B teacher model on four
+synthetic workflows, so fitting them is teacher distillation for one benchmark, and the card itself warns that high
+scores reflect the teacher's quirks. The headline numbers are zero-shot. The tree-profile row is the only one fitted to
+benchmark labels (out-of-fold, a few hundred parameters); it shows what a per-customer decision profile does with
+labeled data, and is not a zero-shot result.
+
 ### Public benchmarks
 
 <p align="center"><img src="docs/img/public_benchmarks.png" alt="public benchmark accuracy" width="760"></p>
@@ -294,7 +300,6 @@ Everything below is either running or planned. Results will be added here and in
 | GPUs other than the Jetson AGX Orin (desktop and data-center cards, DGX Spark inference) | Planned. All memory and latency numbers are from one Orin 64 GB. |
 | GPU tests in CI | Planned. Unit tests run on CPU with a tiny random model; one GPU test covers the fused attention path. |
 | Confidence intervals for the quantization and explanation tables | Planned. Those tables use single runs on subsets (500 + 276 questions, 24 cases). |
-| typed-decisions with the train split (specialist mode, as Verdict and Laya report) | Planned. |
 | `none` option on out-of-distribution sets and hard negatives | Planned. Current numbers use held-out questions from the training families. |
 | Robustness to prompt injection inside a state (not detection) | Planned. |
 | Behavioral probe battery on Jev itself | Blocked on API access. |

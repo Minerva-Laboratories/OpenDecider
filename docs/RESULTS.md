@@ -444,3 +444,25 @@ so scores are never materialized). One fresh process per config, memory, latency
   10% (15k tokens) to 26% (0.8k tokens) of latency.
 - On the GPU the fused path matches the per-row-copy path to within 0.004 to 0.008 in probability (bf16 kernel
   rounding).
+
+## 10. Latency breakdown (2B, Orin in MAXN, int8 weights, int8 cache)
+
+`scripts/profile_latency.py` (CUDA-synced wall time per stage, prefix cache off, after warm-up; 3 questions, 14
+option rows including `none`). CUPTI kernel timing is not permitted on this Jetson, so only stage times are available.
+
+| Stage | 838-token state | 14,752-token state |
+|---|---|---|
+| State pass (backbone prefill) | 385 ms (44%) | 4,227 ms (87%) |
+| Option rows (backbone, one row per option) | 357 ms (41%) | 476 ms (10%) |
+| LM log-prob feature (tied head over the vocabulary) | 53 ms | 53 ms |
+| Tokenizer | 5 ms | 43 ms |
+| Trunk, heads, Python | 67 ms | 82 ms |
+| Total | 870 ms | 4,885 ms |
+
+- Short states are launch-bound: 838 tokens and 14 short rows are too little work to fill the GPU, so time goes to
+  kernel launches and Python. CUDA graphs over bucketed shapes are the main lever (an earlier measurement on the 0.8B
+  backbone: one forward took 160 ms eager and 19 ms in a CUDA graph).
+- Long states are compute-bound: 14,752 tokens through a 2B model is about 60 TFLOP, so about 4 s is close to what
+  the Orin delivers. The prefix cache (repeat or growing states) and retrieval (fewer tokens) are the levers here.
+- int8 weight-only matmuls dequantize every call. bf16 weights (`weight_quant: none`, 3.6 GB) run the 838-token case
+  in 0.55 s instead of 0.86 s, and 15k tokens in 4.65 s instead of 4.92 s.
