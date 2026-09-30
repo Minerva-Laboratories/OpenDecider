@@ -440,7 +440,7 @@ so scores are never materialized). One fresh process per config, memory, latency
 | NF4 / int4 | 1.258 | 1.772 / 1.831 / 2.470 | 0.637 / 1.287 / 4.384 | 67.3 | 0.410 | 0.363 | 0.202 | 0.781 | 0.698 |
 
 - The int4 cache keeps accuracy within noise of int8 on all three sets.
-- NF4 weights cost 5 to 8 points on the public sets and about 0.03 on typed-decisions, and save 0.6 GB and 15 to
-  25% latency.
+- NF4 weights cost 4 to 8 points on the public sets and 0.02 to 0.03 on typed-decisions. They save 0.6 GB, and
+  10% (15k tokens) to 26% (0.8k tokens) of latency.
 - On the GPU the fused path matches the per-row-copy path to within 0.004 to 0.008 in probability (bf16 kernel
   rounding).

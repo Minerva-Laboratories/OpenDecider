@@ -138,7 +138,7 @@ detection (116).
 - A 4-bit cache is safe: accuracy stays within noise. The stored state is small
   either way because the backbone has only 6 attention layers with 2 KV heads; the fixed-size GDN recurrent state
   stays bf16.
-- 4-bit weights (NF4) save 0.6 GB and about 20% latency on short states, but cost 4 to 8 points on the public sets.
+- 4-bit weights (NF4) save 0.6 GB and 10 to 26% latency (more on short states), but cost 4 to 8 points on the public sets.
   Retraining the head on NF4 features may recover part of that.
 - The remaining growth with state length is the one-time activations of the state pass. Chunked prefill would
   reduce it.
