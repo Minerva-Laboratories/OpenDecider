@@ -60,6 +60,7 @@ class ModelConfig:
                                          # | stitch (linear map of unit-normalised layers into another backbone's space)
     v3_stitch_dim: int = 0               # stitch: width of the feature space the trunk was trained on (e.g. 2048)
     v3_none: bool = False                # learned `none` sink option appended to every question (last logit column)
+    v3_shared_prefix: bool = True        # branched rows: one shared state K/V per state, no per-row copies
     v3_branch_chunk: int = 64            # branched: rows per backbone call (each row copies ~18 MB of GDN state)
     v3_cross: str = "full"               # V3: options cross-attend to full [state;question] | question | none
     v3_option_repr: str = "embed"        # question_conditioned: option tokens as input EMBEDDINGS (the space the

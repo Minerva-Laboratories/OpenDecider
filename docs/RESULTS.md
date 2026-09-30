@@ -402,3 +402,26 @@ differences below about 0.04 (typed-decisions) or 0.06 (public sets) are within 
   1.258 GB and short-state latency by about 22%. Public-set accuracy drops by 4 to 8 points.
 - Peak memory is set by the question-row activations and the cached bf16 embedding table used for the LM log-prob
   feature (about 1 GB), not by weights or cache.
+
+### 9.1 After removing per-row K/V copies and unused state features
+
+Two memory fixes, both exact (unit tests compare against the old path):
+- Shared-prefix attention (`src/opendecider/prefix_attn.py`, `v3_shared_prefix`, default on): the full-attention
+  layers of the option rows read one dequantized copy of the state K/V per state and the row's own keys, in one
+  softmax. Before, every row got its own bf16 copy of the state K/V (about 12 KB per state token per row).
+- State-free trunk context (`V3.state_free`, when `v3_cross="question"`): the trunk never reads state tokens, so the
+  state pass no longer returns hidden features and the trunk context holds only question tokens (RoPE positions still
+  offset by the state length). Before, about 1.5 GB of masked state features were built at 15k tokens.
+- `_token_logprob` and `/v1/explain` read the int8 embedding table in chunks instead of keeping a 1 GB bf16 copy.
+
+Fresh process per config (`runs/quant/mem3_*.json`, `runs/quant/acc3.json`):
+
+| Weights / cache | Weights (GB) | Peak GB at 838 / 3,744 / 14,752 tokens | Latency s, same states | typed acc | typed KL | typed Brier | Banking77 8-way | Injection detection |
+|---|---|---|---|---|---|---|---|---|
+| int8 / int8 | 1.877 | 2.412 / 2.612 / 3.415 | 0.853 / 1.616 / 5.161 | 0.442 | 0.353 | 0.190 | 0.819 | 0.776 |
+| int8 / int4 | 1.877 | 2.410 / 2.603 / 3.379 | 0.856 / 1.629 / 5.178 | – | – | – | – | – |
+| NF4 / int8 | 1.258 | 1.789 / 1.993 / 2.796 | 0.681 / 1.457 / 5.002 | – | – | – | – | – |
+| NF4 / int4 | 1.258 | 1.787 / 1.981 / 2.757 | 0.680 / 1.472 / 4.984 | 0.408 | 0.362 | 0.202 | 0.781 | 0.698 |
+
+Peak memory at 14,752 tokens fell from 7.681 to 3.415 GB (int8 / int8) and from 7.022 to 2.757 GB (NF4 / int4).
+Accuracy is unchanged within noise (typed-decisions accuracy moved by near-ties; KL and Brier are equal).

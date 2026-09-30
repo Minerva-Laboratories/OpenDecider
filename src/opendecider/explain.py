@@ -95,10 +95,18 @@ class Explainer:
                  adapters: bool = False) -> list[str]:
         """n continuations of `prompt` (batched), plain backbone by default (decision adapters off)."""
         bb, dev = self.bb, self.bb.device
-        E = self.m.__dict__.get("_E")
-        if E is None:
-            E = bb.lm.embed_tokens.weight.detach().to(torch.bfloat16)
-            self.m.__dict__["_E"] = E
+        emb = bb.lm.embed_tokens
+        q8, sc = getattr(emb, "qweight", None), getattr(emb, "scale", None)
+        W = None if q8 is not None else emb.weight
+
+        def lm_logits(hl, chunk=32768):          # tied LM head, table read in chunks (no full-precision copy)
+            V = (q8 if q8 is not None else W).shape[0]
+            parts = []
+            for a in range(0, V, chunk):
+                Ec = (q8[a:a + chunk].to(torch.bfloat16) * sc[a:a + chunk].to(torch.bfloat16)) if q8 is not None \
+                    else W[a:a + chunk].to(torch.bfloat16)
+                parts.append((hl.to(torch.bfloat16) @ Ec.t()).float())
+            return torch.cat(parts, -1)
         ids = torch.tensor([bb.tokenize([prompt])[0]] * n, device=dev)
         stop = {bb.tok.eos_token_id, *bb.tok.convert_tokens_to_ids(["<|im_end|>", "<|endoftext|>"])}
         # no hidden-reasoning block: the answer is the explanation itself
@@ -113,7 +121,7 @@ class Explainer:
             out = torch.empty(n, 0, dtype=torch.long, device=dev)
             done = torch.zeros(n, dtype=torch.bool, device=dev)
             for _ in range(max_new):
-                logits = (h[:, -1].to(torch.bfloat16) @ E.t()).float()
+                logits = lm_logits(h[:, -1])
                 logits[:, ban] = -float("inf")
                 if temperature > 0:
                     nxt = torch.multinomial(torch.softmax(logits / temperature, -1), 1, generator=g).squeeze(1)

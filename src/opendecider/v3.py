@@ -37,6 +37,7 @@ from .heads import NEG
 from .models import DecisionModel, DecisionOutput, Memory, VARIANTS
 from .options import SlotEmbedding
 from .cache import TokenCache, encode_missing, segment_layout
+from .prefix_attn import shared_prefix_attention
 from .quant import Int8Tensor, kv_mode, materialize, maybe_quantize
 
 
@@ -190,6 +191,8 @@ class V3(DecisionModel):
             self.stitch = nn.Linear(len(backbone.cfg.feature_layers) * self.d, self.df)
         self.branched = cfg.v3_features == "branched"
         self.q_only = cfg.v3_features == "question_conditioned"
+        # the trunk never reads state tokens when options cross-attend to the question only: skip state features
+        self.state_free = self.conditioned and cfg.v3_cross == "question"
         if self.conditioned:
             # micro-batch sizing: one row per question, or one row per option when branched
             self.pack_mode = "independent" if self.branched else "joint"
@@ -268,13 +271,17 @@ class V3(DecisionModel):
         on itself, so the recompute sees the same inputs and adapters as the forward (peak = state graph + 1 chunk)."""
         bb, vera = self.backbone, getattr(self, "vera", None)
 
+        shared = self.cfg.v3_shared_prefix
+
         def run(ids, mask):
             prev = vera.active if vera is not None else None
             if vera is not None:
                 vera.active = True
             try:
-                f, _ = bb(ids, mask, layers=bb.cfg.feature_layers, past_key_values=pc.unpack_rows(rows),
-                          use_cache=True, past_mask=smask.index_select(0, rows))
+                with shared_prefix_attention(bb, pc, rows, smask) if shared else contextlib.nullcontext():
+                    f, _ = bb(ids, mask, layers=bb.cfg.feature_layers,
+                              past_key_values=pc.unpack_rows(rows, attn_placeholder=shared),
+                              use_cache=True, past_mask=smask.index_select(0, rows))
                 return self._wide(f)
             finally:
                 if vera is not None:
@@ -295,7 +302,9 @@ class V3(DecisionModel):
         if full:
             vera.active = True
         try:
-            return self.backbone.prefix_cache_batch(mem.extra_prefix, return_hidden=True, grad=grad, quantize=quantize)
+            out = self.backbone.prefix_cache_batch(mem.extra_prefix, return_hidden=not self.state_free, grad=grad,
+                                                   quantize=quantize)
+            return (*out, None) if self.state_free else out
         finally:
             if full:
                 vera.active = False
@@ -321,7 +330,8 @@ class V3(DecisionModel):
 
     def _conditioned_feats(self, questions, mem):
         s_flat, s_lens, q_flat, q_lens, o_flat, o_lens = self._conditioned_feats_raw(questions, mem)
-        return self._mix_wide(s_flat), s_lens, self._mix_wide(q_flat), q_lens, self._mix_wide(o_flat), o_lens
+        s_mix = None if s_flat is None else self._mix_wide(s_flat)
+        return s_mix, s_lens, self._mix_wide(q_flat), q_lens, self._mix_wide(o_flat), o_lens
 
     def _conditioned_feats_raw(self, questions, mem):
         """Frozen LLM pass, no grad: states once (left-padded batched prefix), then ONE row per question
@@ -361,7 +371,7 @@ class V3(DecisionModel):
             flat = f[(r.to(dev), c.to(dev))]
             tok_is_q = is_q[seg].to(dev)
             q_flat, o_flat = flat[tok_is_q], flat[~tok_is_q]
-            s_flat = self._wide(sh)[smask]
+            s_flat = None if sh is None else self._wide(sh)[smask]
         s_lens = smask.sum(1).cpu()
         return s_flat, s_lens, q_flat, lens[is_q], o_flat, lens[~is_q]
 
@@ -414,7 +424,7 @@ class V3(DecisionModel):
                 assert bb.cfg.feature_layers[-1] == "final", "v3_lm_feature needs 'final' as the last feature layer"
                 h_prev = F[(r2.to(dev), oc - 1)][:, -self.d:]
                 self._lm_lp = self._token_logprob(h_prev, ids[(r2, lqr[r2] + c2)].to(dev))
-            s_flat = self._wide(sh)[smask]
+            s_flat = None if sh is None else self._wide(sh)[smask]
         return s_flat, smask.sum(1).cpu(), q_flat, lq, o_flat, lo
 
     def _branched_feats_qcache(self, questions, mem, pc, smask, sh):
@@ -479,22 +489,24 @@ class V3(DecisionModel):
                 q_last = Q[torch.arange(N, device=dev), (lq - 1).to(dev), -self.d:]
                 h_prev = torch.cat([q_last[row_q.to(dev)][:, None], F[:, :-1, -self.d:]], 1)[om]
                 self._lm_lp = self._token_logprob(h_prev, O.to(dev)[om])
-            s_flat = self._wide(sh)[smask]
+            s_flat = None if sh is None else self._wide(sh)[smask]
         return s_flat, smask.sum(1).cpu(), q_flat, lq, o_flat, lo
 
     @torch.no_grad()
     def _token_logprob(self, h: torch.Tensor, tok: torch.Tensor, chunk: int = 32768) -> torch.Tensor:
-        """log softmax(h @ Eᵀ)[tok] with the tied embedding table E, normaliser by chunked log-sum-exp (never
-        materialises the full (n × vocab) matrix). Fixed feature (no gradient)."""
-        E = self.__dict__.get("_E")
-        if E is None:
-            E = self.backbone.lm.embed_tokens.weight.detach().to(torch.bfloat16)      # dequantised once, cached
-            self.__dict__["_E"] = E
+        """log softmax(h @ Eᵀ)[tok] with the tied embedding table E, normaliser by chunked log-sum-exp. Reads the
+        table in place (int8 rows dequantised one chunk at a time; no full-precision copy is kept). Fixed feature."""
+        emb = self.backbone.lm.embed_tokens
+        q, sc = getattr(emb, "qweight", None), getattr(emb, "scale", None)
+        W = None if q is not None else emb.weight
         hb = h.to(torch.bfloat16)
         lse = torch.full((h.shape[0],), -float("inf"), device=h.device)
-        for a in range(0, E.shape[0], chunk):
-            lse = torch.logaddexp(lse, torch.logsumexp((hb @ E[a:a + chunk].t()).float(), dim=-1))
-        return (h.float() * E[tok].float()).sum(-1) - lse
+        V = (q if q is not None else W).shape[0]
+        for a in range(0, V, chunk):
+            Ec = (q[a:a + chunk].to(torch.bfloat16) * sc[a:a + chunk].to(torch.bfloat16)) if q is not None \
+                else W[a:a + chunk].to(torch.bfloat16)
+            lse = torch.logaddexp(lse, torch.logsumexp((hb @ Ec.t()).float(), dim=-1))
+        return (h.float() * emb(tok).float()).sum(-1) - lse
 
     def _question_conditioned_feats(self, questions, mem, pc, smask, sh):
         """Rows are ONLY [question ... Answer:] continuing from the state cache (binding happens in the LLM);
@@ -507,7 +519,7 @@ class V3(DecisionModel):
             f, _ = bb(ids, mask, layers=bb.cfg.feature_layers, past_key_values=pc.unpack_rows(sidx), use_cache=True,
                       past_mask=smask.index_select(0, sidx))
             q_flat = self._wide(f)[mask]
-            s_flat = self._wide(sh)[smask]
+            s_flat = None if sh is None else self._wide(sh)[smask]
         q_lens = torch.tensor([len(t) for t in toks])
         if self.cfg.v3_option_repr == "embed":
             # The question's final state predicts the answer's tokens; with tied embeddings those live in the
@@ -573,9 +585,11 @@ class V3(DecisionModel):
         sidx = torch.tensor([q.state_idx for q in questions])
         if self.conditioned:
             s_flat, s_lens, q_flat, q_lens, o_flat, o_lens = self._conditioned_feats(questions, mem)
-            srow, scol, _, _, _ = segment_layout(s_lens, torch.arange(len(s_lens)), len(s_lens))
-            S = torch.zeros(len(s_lens), int(s_lens.max()), self.df, device=dev)
-            S[(srow.to(dev), scol.to(dev))] = s_flat                # right-aligned state features
+            S = None
+            if s_flat is not None:
+                srow, scol, _, _, _ = segment_layout(s_lens, torch.arange(len(s_lens)), len(s_lens))
+                S = torch.zeros(len(s_lens), int(s_lens.max()), self.df, device=dev)
+                S[(srow.to(dev), scol.to(dev))] = s_flat            # right-aligned state features
         else:
             q_flat, q_lens = self.text_feats([question_text(q.prompt) for q in questions])
             o_flat, o_lens = self.text_feats([option_text(o) for q in questions for o in q.options])
@@ -601,16 +615,20 @@ class V3(DecisionModel):
         x_pad = opt_id < 0
         # ---- context [state ; question] -> (N, Tc, d)
         ts = s_lens[sidx]                                                               # (N,) CPU
+        pos0 = torch.zeros_like(ts)                                                     # RoPE offset of column 0
+        if S is None:                   # state-free: context = question tokens only, positions still after the state
+            pos0, ts = ts, torch.zeros_like(ts)
         Tc = int((ts + q_lens).max())
         C = torch.zeros(N, Tc, self.df, device=dev)
-        T = min(S.shape[1], Tc)
-        C[:, :T] = S.index_select(0, sidx.to(dev))[:, :T]
+        if S is not None:
+            T = min(S.shape[1], Tc)
+            C[:, :T] = S.index_select(0, sidx.to(dev))[:, :T]
         qrow, qcol, _, qpos, _ = segment_layout(q_lens, torch.arange(N), N)
         C[(qrow.to(dev), (qcol + ts[qrow]).to(dev))] = q_flat                            # overwrite pads after state
         t = torch.arange(Tc)[None, :]
         in_state = t < ts[:, None]
         in_q = (t >= ts[:, None]) & (t < (ts + q_lens)[:, None])
-        cpos = t.expand(N, -1).clone()                                                # state 0..Ts-1, question Ts..
+        cpos = t + pos0[:, None]                                                      # state 0..Ts-1, question Ts..
         c_pad = ~(in_state | in_q)
         C = C * (~c_pad).to(dev)[..., None]                                             # zero state padding
         # ---- stack inputs: part-specific projections, positions via RoPE inside attention

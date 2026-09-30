@@ -308,7 +308,7 @@ class PackedCache:
                 getattr(cache.layers[li], a)[k] = x
         return cache
 
-    def unpack_rows(self, rows: torch.Tensor, autograd_safe: bool = True):
+    def unpack_rows(self, rows: torch.Tensor, autograd_safe: bool = True, attn_placeholder: bool = False):
         """Fresh cache whose batch row i is the packed row `rows[i]` (one gather per tensor).
 
         autograd_safe: transformers updates GDN conv/recurrent states IN PLACE (copy_), which breaks backward when
@@ -327,6 +327,11 @@ class PackedCache:
                 if isinstance(getattr(l, a, None), dict):
                     setattr(l, a, dict(getattr(l, a)))
         for (li, a, k), t in self.tensors.items():
+            if attn_placeholder and a in _KV_ATTRS:           # shared-prefix attention reads K/V itself (prefix_attn)
+                sh = (rows.numel(), *t.shape[1:])
+                dev = t.q.device if isinstance(t, Int8Tensor) else t.device
+                setattr(cache.layers[li], a, torch.zeros((), dtype=t.dtype, device=dev).expand(sh))
+                continue
             if isinstance(t, Int8Tensor):                      # select rows on int8 FIRST, then dequantise
                 x = t.index_select(0, rows.to(t.q.device)).dequantize()
             else:

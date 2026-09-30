@@ -229,7 +229,7 @@ class Decider:
             cfg = self.model.cfg
             # state-token features are only read by the trunk when it cross-attends to the state; with
             # v3_cross='question' the row pass needs the LLM cache alone, which is what gets cached
-            if mb > 0 and getattr(self.model, "conditioned", False) and getattr(cfg, "v3_cross", "") == "question":
+            if mb > 0 and getattr(self.model, "state_free", False):
                 from .state_cache import PrefixCache
                 pc = PrefixCache(self.model.backbone, max_bytes=mb << 20)
             self.__dict__["_pcache"] = pc
@@ -261,10 +261,7 @@ class Decider:
         content = text_chunks(prefix) + content
         mem = self.model.encode_states(["".join(content + closers)])
         pc, smask, n_cached = pcache.encode(content, closers, ctx=self._state_pass_ctx)
-        nL, d = len(self.model.backbone.cfg.feature_layers), self.model.d
-        sh = torch.zeros((nL, 1, smask.shape[1], d) if nL > 1 else (1, smask.shape[1], d),
-                         dtype=torch.bfloat16, device=smask.device)
-        mem.prefix_batch = (pc, smask, sh)
+        mem.prefix_batch = (pc, smask, None)          # state-free trunk: no state-token features needed
         mem.n_tokens = smask.shape[1]
         return mem, n_cached
 

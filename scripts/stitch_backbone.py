@@ -83,7 +83,7 @@ def cmd_targets(a):
     Y, t0 = [], time.time()
     for k, (qs, mem) in enumerate(calls(model, recs)):
         s, _, q, _, o, _ = model._conditioned_feats(qs, mem)          # after the layer combine, before in_norm
-        Y.append(torch.cat([s, q, o]).half().cpu())
+        Y.append(torch.cat([x for x in (s, q, o) if x is not None]).half().cpu())   # s is None on state-free models
         if (k + 1) % 25 == 0:
             print(f"  {k + 1} calls, {sum(y.shape[0] for y in Y)} tokens, {time.time() - t0:.0f}s", flush=True)
     os.makedirs(os.path.dirname(a.out), exist_ok=True)
@@ -114,7 +114,7 @@ def cmd_fit(a):
     t0 = time.time()
     for k, (qs, mem) in enumerate(calls(model, T["recs"])):
         s, _, q, _, o, _ = model._conditioned_feats_raw(qs, mem)       # raw wide features (L * d_b)
-        X = stitch_inputs(torch.cat([s, q, o]), n_l, d_b)
+        X = stitch_inputs(torch.cat([x for x in (s, q, o) if x is not None]), n_l, d_b)
         Y = T["Y"][k].float().to(X.device)
         assert Y.shape[0] == X.shape[0], f"token mismatch in call {k}: {Y.shape[0]} vs {X.shape[0]}"
         Y = unit(Y)

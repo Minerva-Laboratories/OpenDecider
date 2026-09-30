@@ -296,7 +296,7 @@ def test_question_cache_matches_repeated_question_rows():
     outs = []
     for qc in (False, True):
         m = make(bb, "v3", v3_features="branched", v3_row_format="answer", v3_lm_feature=True, v3_list_cap=255,
-                 v3_question_cache=qc, v3_branch_chunk=3).eval()
+                 v3_question_cache=qc, v3_branch_chunk=3, v3_shared_prefix=False).eval()
         torch.manual_seed(0)
         with torch.no_grad():
             seqs = bb.tokenize(state_texts([STATE, "Short other state."]))
@@ -305,3 +305,42 @@ def test_question_cache_matches_repeated_question_rows():
             outs.append([t.float() for t in f[::2]] + [m._lm_lp.float()])
     for a, b in zip(*outs):
         torch.testing.assert_close(a, b, rtol=1e-4, atol=1e-4)
+
+
+def test_shared_prefix_attention_matches_per_row_copies():
+    """Branched rows with one shared state K/V (prefix_attn) == the per-row-copy path, for several states."""
+    import torch
+    from opendecider.batching import Question
+    from tiny import tiny_backbone
+    bb = tiny_backbone(layers=(4, "final"), kv_quant="none")
+    qs = [Question("Which team?", ["billing", "technical support", "refund"], "choice", state_idx=0),
+          Question("Urgent?", ["yes", "no"], "noul", state_idx=1),
+          Question("Severity?", ["low", "medium", "high", "critical"], "score", state_idx=0)]
+    states = ["State:\n{\"msg\": \"charged twice for my order\"}\n", "State:\n{\"msg\": \"hi\", \"n\": [1, 2, 3, 4, 5]}\n"]
+    out = {}
+    for shared in (False, True):
+        m = make(bb, "v3", v3_features="branched", v3_row_format="answer", slot_emb="none", v3_cross="question",
+                 v3_shared_prefix=shared, v3_branch_chunk=3)
+        with torch.no_grad():
+            _, o = m.run(qs, m.encode_states(states))
+        out[shared] = o.logits
+    assert torch.allclose(out[False], out[True], atol=1e-4), (out[False] - out[True]).abs().max()
+
+
+def test_state_free_trunk_matches_full_context():
+    """v3_cross='question' masks state tokens, so skipping state features (state_free) gives the same logits."""
+    import torch
+    from opendecider.batching import Question
+    from tiny import tiny_backbone
+    bb = tiny_backbone(layers=(4, "final"), kv_quant="none")
+    qs = [Question("Which team?", ["billing", "technical support", "refund"], "choice", state_idx=0),
+          Question("Urgent?", ["yes", "no"], "noul", state_idx=1)]
+    states = ["State:\n{\"msg\": \"charged twice for my order\"}\n", "State:\n{\"msg\": \"hi\", \"n\": [1, 2, 3]}\n"]
+    m = make(bb, "v3", v3_features="branched", v3_row_format="answer", slot_emb="none", v3_cross="question",
+             v3_context_layers=1)
+    assert m.state_free
+    with torch.no_grad():
+        _, a = m.run(qs, m.encode_states(states))
+        m.state_free = False                                        # old path: state features built, then masked
+        _, b = m.run(qs, m.encode_states(states))
+    assert torch.allclose(a.logits, b.logits, atol=1e-5), (a.logits - b.logits).abs().max()

@@ -115,7 +115,7 @@ unrelated state. AUROC measures how well P(none) separates unanswerable from ans
 Accuracy on answerable questions is unchanged (0.892). A learned `none` vector with only its two parameters trained
 did worse (unrelated-state AUROC 0.537). See [`docs/roadmap_designs.md`](docs/roadmap_designs.md).
 
-### Quantization (Jetson AGX Orin, 2B backbone, no retraining)
+### Memory and quantization (Jetson AGX Orin, 2B backbone, no retraining)
 
 The model was trained with int8 weights and an int8 cache. Memory and latency come from one fresh process per
 config. Accuracy: 500 typed-decisions questions (first 100 test cases), Banking77 8-way (160), prompt-injection
@@ -123,16 +123,20 @@ detection (116).
 
 | Weights / cache | Weight memory | Peak GPU memory, 0.8k / 3.7k / 15k-token state | Latency, same states | Stored state, 15k tokens | typed-decisions | Banking77 | Injection detection |
 |---|---|---|---|---|---|---|---|
-| int8 / int8 (default) | 1.88 GB | 3.5 / 4.4 / 7.7 GB | 0.82 / 1.69 / 5.70 s | 106 MB | 0.426 | 0.819 | 0.776 |
-| int8 / int4 | 1.88 GB | 3.5 / 4.4 / 7.6 GB | 0.83 / 1.71 / 5.77 s | 67 MB | 0.444 | 0.812 | 0.767 |
-| NF4 / int8 | 1.26 GB | 2.9 / 3.8 / 7.1 GB | 0.63 / 1.50 / 5.47 s | 106 MB | 0.406 | 0.756 | 0.707 |
-| NF4 / int4 | 1.26 GB | 2.9 / 3.8 / 7.0 GB | 0.64 / 1.52 / 5.60 s | 67 MB | 0.410 | 0.781 | 0.698 |
+| int8 / int8 (default) | 1.88 GB | 2.4 / 2.6 / 3.4 GB | 0.85 / 1.62 / 5.16 s | 106 MB | 0.442 | 0.819 | 0.776 |
+| int8 / int4 | 1.88 GB | 2.4 / 2.6 / 3.4 GB | 0.86 / 1.63 / 5.18 s | 67 MB | – | – | – |
+| NF4 / int8 | 1.26 GB | 1.8 / 2.0 / 2.8 GB | 0.68 / 1.46 / 5.00 s | 106 MB | – | – | – |
+| NF4 / int4 | 1.26 GB | 1.8 / 2.0 / 2.8 GB | 0.68 / 1.47 / 4.98 s | 67 MB | 0.408 | 0.781 | 0.698 |
 
-- A 4-bit cache is safe (accuracy within noise) but saves little: the backbone has only 6 attention layers with few
-  KV heads, so the stored state for 15k tokens is about 0.1 GB either way. The GDN recurrent state stays bf16.
+- Option rows attend to one shared copy of the state's K/V (shared-prefix attention) instead of each row getting
+  its own full-precision copy. Before this, peak memory at 15k tokens was 7.7 GB (int8) and 7.0 GB (NF4 / int4).
+- A 4-bit cache is safe (the earlier run gave 0.444 / 0.812 / 0.767 for int8 / int4). The stored state is small
+  either way because the backbone has only 6 attention layers with 2 KV heads; the fixed-size GDN recurrent state
+  stays bf16.
 - 4-bit weights (NF4) save 0.6 GB and about 20% latency on short states, but cost 4 to 8 points on the public sets.
   Retraining the head on NF4 features may recover part of that.
-- Peak memory is dominated by activations of the question rows, not by weights or cache.
+- The remaining growth with state length is the one-time activations of the state pass. Chunked prefill would
+  reduce it.
 
 Set `weight_quant: nf4` and `kv_quant: int4` in `configs/backbone*.yaml`. Script: `scripts/bench_quant.py`.
 
@@ -188,7 +192,7 @@ Design notes: [`docs/roadmap_designs.md`](docs/roadmap_designs.md),
 
 | | Minimum | Tested |
 |---|---|---|
-| GPU memory, 2B backbone | 3.5 GB for states up to about 1k tokens, 4.5 GB up to 4k, 8 GB up to 15k (int8 weights: 1.9 GB). With 4-bit weights: 2.9 / 3.8 / 7.0 GB | Jetson AGX Orin 64 GB (inference), DGX Spark (training) |
+| GPU memory, 2B backbone | 2.5 GB for states up to about 1k tokens, 2.7 GB up to 4k, 3.5 GB up to 15k (int8 weights: 1.9 GB). With 4-bit weights and cache: 1.8 / 2.0 / 2.8 GB | Jetson AGX Orin 64 GB (inference), DGX Spark (training) |
 | GPU memory, 9B backbone | about 10 GB of int8 weights plus the same per-state cost (estimate, not measured) | Jetson AGX Orin 64 GB |
 | Host RAM | 12 GB peak while loading the 2B backbone | same |
 | Disk, 2B backbone | 4.3 GB weights + about 0.1 GB checkpoint | same |
@@ -197,7 +201,7 @@ Design notes: [`docs/roadmap_designs.md`](docs/roadmap_designs.md),
 | Python | 3.12 | 3.12 on aarch64 (JetPack) |
 | CPU only | Unit tests only (tiny random model) | – |
 
-Weights are loaded as int8 (or NF4, see [Quantization](#quantization-jetson-agx-orin-2b-backbone-no-retraining)), so GPU memory is lower
+Weights are loaded as int8 (or NF4, see [Memory and quantization](#memory-and-quantization-jetson-agx-orin-2b-backbone-no-retraining)), so GPU memory is lower
 than the bf16 download size. The prefix cache adds up to
 `OPENDECIDER_STATE_CACHE_MB` (default 2 GB). The code keeps at least 4 GB of disk
 free and refuses downloads that would go below that.

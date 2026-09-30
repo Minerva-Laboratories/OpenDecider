@@ -229,7 +229,8 @@ def step_loss(model, recs, rng, tcfg, noise_std=0.0, backward=True):
         for key, t in list(pc.tensors.items()):
             if torch.is_tensor(t):
                 pc.tensors[key] = leaves[key] = t.detach().requires_grad_()
-        sh = leaves["hidden"] = sh.detach().requires_grad_()
+        if sh is not None:                                  # None on state-free models (v3_cross='question')
+            sh = leaves["hidden"] = sh.detach().requires_grad_()
         v0_mem.prefix_batch = (pc, smask_, sh)
         roots = True
     for gi, group in enumerate(groups):
@@ -276,7 +277,7 @@ def step_loss(model, recs, rng, tcfg, noise_std=0.0, backward=True):
         v0_mem.prefix_batch = None
         if any(l.grad is not None for l in leaves.values()):
             pc2, _, sh2 = model._state_prefix(v0_mem, grad=True)                 # same pass, now with its graph
-            outs = {**pc2.tensors, "hidden": sh2}
+            outs = {**pc2.tensors, **({"hidden": sh2} if sh2 is not None else {})}
             pairs = [(outs[k], l.grad) for k, l in leaves.items() if l.grad is not None and outs[k].requires_grad]
             torch.autograd.backward([o for o, _ in pairs], [g for _, g in pairs])
             del pc2, sh2, outs, pairs
