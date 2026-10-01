@@ -55,6 +55,17 @@ def mask_options(text: str, names) -> str:
     return text
 
 
+def _linear_states(cache, clone: bool = False) -> list:
+    """Every GDN conv/recurrent state tensor in a cache (dict-valued or tensor-valued layer attributes)."""
+    out = []
+    for layer in cache.layers:
+        for a in ("conv_states", "recurrent_states"):
+            v = getattr(layer, a, None)
+            ts = [t for t in v.values() if torch.is_tensor(t)] if isinstance(v, dict) else ([v] if torch.is_tensor(v) else [])
+            out += [t.clone() if clone else t for t in ts]
+    return out
+
+
 class Explainer:
     def __init__(self, decider):
         self.dec = decider
@@ -90,43 +101,112 @@ class Explainer:
         return ev, P[0]
 
     # ------------------------------------------------------------------ generation
+    # ------------------------------------------------------------------ fast decoding
+    def _lm_head(self):
+        """The LM head packed once as a GemLite A16W8 GEMM (CUDA) instead of dequantizing the int8 table per token."""
+        h = self.__dict__.get("_head")
+        if h is None:
+            bb = self.bb
+            W, sc = bb._head_rows()
+            if bb.device.type != "cuda":
+                h = bb.head_logits
+            else:
+                from .quant import gemlite_linear
+                lin = torch.nn.Linear(W.shape[1], W.shape[0], bias=False, device=bb.device, dtype=torch.bfloat16)
+                for a in range(0, W.shape[0], 32768):          # dequantize in chunks into the bf16 staging copy
+                    lin.weight.data[a:a + 32768] = (W[a:a + 32768].to(torch.bfloat16) *
+                                                    (sc[a:a + 32768].to(torch.bfloat16) if sc is not None else 1))
+                g = gemlite_linear(lin, 8)
+                del lin
+                torch.cuda.empty_cache()
+                h = lambda x: g(x.to(torch.bfloat16)).float()
+            self.__dict__["_head"] = h
+        return h
+
+    def _stop_tables(self):
+        """Per token id: contains a newline (byte-level BPE: newline = 'Ċ'); has visible content."""
+        t = self.__dict__.get("_stop")
+        if t is None:
+            toks = self.bb.tok.convert_ids_to_tokens(list(range(len(self.bb.tok))))
+            dev = self.bb.device
+            f = lambda pred: torch.tensor([bool(x) and pred(x) for x in toks], device=dev)
+            t = (f(lambda x: "Ċ" in x), f(lambda x: x.strip("Ċ ") != ""))
+            self.__dict__["_stop"] = t
+        return t
+
     @torch.no_grad()
     def generate(self, prompt: str, max_new: int = 80, temperature: float = 0.0, n: int = 1, seed: int = 0,
-                 adapters: bool = False) -> list[str]:
-        """n continuations of `prompt` (batched), plain backbone by default (decision adapters off)."""
+                 adapters: bool = False, graph: bool = True) -> list[str]:
+        """n continuations of `prompt` (batched), plain backbone by default (decision adapters off). Stops each
+        sequence at the end of its first line of content. On CUDA the decode step (backbone with a static cache +
+        LM head) runs as one CUDA graph; single-token decoding is launch-bound, so this is where graphs pay off."""
+        from transformers.cache_utils import StaticCache
         bb, dev = self.bb, self.bb.device
-        ids = torch.tensor([bb.tokenize([prompt])[0]] * n, device=dev)
-        stop = {bb.tok.eos_token_id, *bb.tok.convert_tokens_to_ids(["<|im_end|>", "<|endoftext|>"])}
-        # no hidden-reasoning block: the answer is the explanation itself
+        graph = graph and dev.type == "cuda"
+        prompt_ids = bb.tokenize([prompt])[0]
+        L = len(prompt_ids)
+        ids = torch.tensor([prompt_ids] * n, device=dev)
+        eos = torch.tensor(sorted({bb.tok.eos_token_id, *bb.tok.convert_tokens_to_ids(["<|im_end|>", "<|endoftext|>"])}
+                                  - {None}), device=dev)
         ban = [t for t in bb.tok.convert_tokens_to_ids(["<think>", "</think>"]) if t is not None and t >= 0]
+        newline, content = self._stop_tables()
+        V = len(newline)                      # tokenizer vocabulary; head rows beyond it are padding
+        head = self._lm_head()
         g = torch.Generator(device=dev).manual_seed(seed)
         vera = getattr(self.m, "vera", None)
         prev = vera.active if vera is not None else None
         if vera is not None:
             vera.active = adapters
         try:
-            h, cache = bb(ids, torch.ones_like(ids, dtype=torch.bool), ("final",), use_cache=True)
+            cache = StaticCache(config=bb.lm.config, max_cache_len=L + max_new + 1)
+            o = bb.lm(input_ids=ids, past_key_values=cache, use_cache=True,
+                      cache_position=torch.arange(L, device=dev))
+            logits = head(o.last_hidden_state[:, -1])
+            tok_buf = torch.zeros(n, 1, dtype=torch.long, device=dev)
+            pos_buf = torch.tensor([L], device=dev)
+
+            def step():
+                h = bb.lm(input_ids=tok_buf, past_key_values=cache, use_cache=True, cache_position=pos_buf)
+                return head(h.last_hidden_state[:, -1])
+            if graph:
+                # warm-up and capture advance the recurrent states: snapshot and restore them
+                saved = _linear_states(cache, clone=True)
+                s = torch.cuda.Stream(); s.wait_stream(torch.cuda.current_stream())
+                with torch.cuda.stream(s):
+                    for _ in range(2):
+                        step()
+                torch.cuda.current_stream().wait_stream(s)
+                cg = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(cg):
+                    out_logits = step()
+                for live, snap in zip(_linear_states(cache), saved):
+                    live.copy_(snap)
             out = torch.empty(n, 0, dtype=torch.long, device=dev)
             done = torch.zeros(n, dtype=torch.bool, device=dev)
+            started = torch.zeros(n, dtype=torch.bool, device=dev)
             for _ in range(max_new):
-                logits = bb.head_logits(h[:, -1])
                 logits[:, ban] = -float("inf")
-                if temperature > 0:
-                    nxt = torch.multinomial(torch.softmax(logits / temperature, -1), 1, generator=g).squeeze(1)
-                else:
-                    nxt = logits.argmax(-1)
+                logits[:, V:] = -float("inf")
+                nxt = torch.multinomial(torch.softmax(logits / temperature, -1), 1, generator=g).squeeze(1) \
+                    if temperature > 0 else logits.argmax(-1)
                 nxt = torch.where(done, torch.full_like(nxt, bb.pad_id), nxt)
                 out = torch.cat([out, nxt[:, None]], 1)
-                done |= torch.isin(nxt, torch.tensor(sorted(stop - {None}), device=dev))
+                done |= torch.isin(nxt, eos) | (started & newline[nxt])    # one paragraph: stop at its line end
+                started |= content[nxt]
                 if bool(done.all()):
                     break
-                h, cache = bb(nxt[:, None], torch.ones(n, 1, dtype=torch.bool, device=dev), ("final",),
-                              past_key_values=cache, use_cache=True)
+                tok_buf.copy_(nxt[:, None])
+                if graph:
+                    cg.replay()
+                    logits = out_logits.clone()
+                else:
+                    logits = step()
+                pos_buf += 1
         finally:
             if vera is not None:
                 vera.active = prev
         texts = bb.tok.batch_decode(out.tolist(), skip_special_tokens=True)
-        return [t.strip().split("\n\n")[0].strip() for t in texts]      # first paragraph (leading blank lines skipped)
+        return [t.strip().split("\n")[0].strip() for t in texts]      # first line (leading blank lines skipped)
 
     # ------------------------------------------------------------------ end to end
     def explain(self, state, q: Question, names=None, n_samples: int = 1, temperature: float = 0.7,

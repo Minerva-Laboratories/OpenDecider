@@ -34,6 +34,7 @@ def main():
     ap.add_argument("--n", type=int, default=24)
     ap.add_argument("--samples", type=int, default=4)
     ap.add_argument("--name", default="explain")
+    ap.add_argument("--weight-quant", default="", help="override the backbone weight mode (e.g. w8 for fast decoding)")
     a = ap.parse_args()
     limit_gpu_memory(float(os.environ.get("OPENDECIDER_EVAL_GPU_GB", "24")))
     rows = load_cases("test")
@@ -44,7 +45,16 @@ def main():
     pick = [r for wf in sorted(by_wf) for r in rng.sample(by_wf[wf], a.n // len(by_wf))]
     res = []
     with gpu_lock("explain_eval"):
-        dec = load_decider(a.ckpt)
+        if a.weight_quant:
+            from opendecider.backbone import Backbone, BackboneConfig
+            from opendecider.checkpoint import load_model
+            from opendecider.decider import Decider
+            ck = torch.load(a.ckpt, map_location="cpu", weights_only=False)
+            bb = Backbone.load(BackboneConfig(**{**ck["backbone_cfg"], "weight_quant": a.weight_quant}))
+            model, extra = load_model(a.ckpt, backbone=bb)
+            dec = Decider(model, extra.get("temperature", 1.0), extra.get("temperature_by_type"))
+        else:
+            dec = load_decider(a.ckpt)
         ex = Explainer(dec)
         for r in pick:
             name, instr, names, texts, gp, lab = next(x for x in questions_of(r) if len(x[2]) >= 3)
