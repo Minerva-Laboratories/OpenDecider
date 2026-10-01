@@ -207,3 +207,18 @@ def gemlite_quantize_(module: nn.Module, bits: int, group: int = 64) -> nn.Modul
         else:
             gemlite_quantize_(child, bits, group)
     return module
+
+
+def gemlite_a8w8_(module: nn.Module) -> nn.Module:
+    """Replace every nn.Linear under `module` with GemLite A8W8: int8 per-channel weights, int8 per-token dynamic
+    activations, int8 tensor-core GEMM (Triton). Fastest prefill GEMM measured on the Orin (scripts/bench_gemm.py)."""
+    from gemlite.helper import A8W8_int8_dynamic
+    for name, child in list(module.named_children()):
+        if isinstance(child, nn.Linear):
+            K, N = child.in_features, child.out_features
+            q = A8W8_int8_dynamic(device=str(child.weight.device), dtype=child.weight.dtype).from_linear(child)
+            q.in_features, q.out_features = K, N
+            setattr(module, name, q)
+        else:
+            gemlite_a8w8_(child)
+    return module

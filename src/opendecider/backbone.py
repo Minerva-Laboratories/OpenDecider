@@ -16,7 +16,8 @@ import torch
 import torch.nn as nn
 import yaml
 
-from .quant import (Int8Embedding, Int8Linear, Int8Tensor, gemlite_quantize_, kv_mode, materialize, maybe_quantize,
+from .quant import (Int8Embedding, Int8Linear, Int8Tensor, gemlite_a8w8_, gemlite_quantize_, kv_mode, materialize,
+                    maybe_quantize,
                     quantize_int8_)
 
 
@@ -26,7 +27,7 @@ class BackboneConfig:
     repo_id: str = "Qwen/Qwen3.5-0.8B"
     revision: str = "2fc06364715b967f1860aea9cf38778875588b17"
     dtype: str = "bfloat16"
-    weight_quant: str = "int8"          # none | int8 | nf4 (bitsandbytes) | w4 | w8 | awq4 (GemLite Triton GEMMs)
+    weight_quant: str = "int8"          # none | int8 | nf4 (bitsandbytes) | w4 | w8 | a8w8 | awq4 (GemLite Triton GEMMs)
     kv_quant: str = "int8"              # none | int8 | int4  (all cached K/V and state memory)
     quantize_linear_state: bool = False  # GDN recurrent/conv state (not a KV cache)
     feature_layers: list = field(default_factory=lambda: ["final"])  # "final" = post-norm last layer, or ints 1..L
@@ -105,6 +106,8 @@ class Backbone(nn.Module):
             quantize_int8_(lm.layers)
         if cfg.weight_quant in ("w4", "w8"):      # low-bit weights on Triton GEMM kernels (GemLite)
             gemlite_quantize_(lm.layers, 4 if cfg.weight_quant == "w4" else 8)
+        if cfg.weight_quant == "a8w8":             # int8 weights and int8 dynamic activations (GemLite)
+            gemlite_a8w8_(lm.layers)
         if cfg.weight_quant == "awq4":             # calibrated 4-bit (scripts/awq_calibrate.py -> cfg.awq_path)
             from .awq import apply_awq_
             apply_awq_(lm.layers, torch.load(cfg.awq_path, weights_only=False)["params"])

@@ -560,6 +560,30 @@ Next after those: optimized decoding for `/v1/explain` (reuse the decision's sta
 prompt, a quantized GEMM for the LM head instead of dequantizing it per token, and a CUDA-graph decode step: single-
 token decoding is launch-bound, unlike the prefill measured above), then re-measure explanation latency.
 
+
+### 12.2 GEMM kernels at the 2B layer shapes
+
+`scripts/bench_gemm.py` (`runs/deploy/gemm.json`): one linear layer, ms per call at M = 64 / 512 / 2048 / 8192 tokens per call. GemLite autotuning in its `fast` mode (`max` took hours per shape). bf16 is listed only as a
+reference.
+
+| Kernel | K=2048, N=6144 | K=6144, N=2048 | K=2048, N=2048 |
+|---|---|---|---|
+| bf16 cuBLAS | 0.74 / 1.82 / 1.85 / 7.05 | 0.17 / 0.61 / 2.11 / 7.87 | 0.10 / 0.17 / 0.58 / 2.13 |
+| int8 dequant+cuBLAS (current) | 1.31 / 1.59 / 3.08 / 7.63 | 1.19 / 1.54 / 2.98 / 8.88 | 0.43 / 0.52 / 0.93 / 2.42 |
+| GemLite A16W8 default | 0.90 / 2.09 / 9.39 / 34.86 | 0.86 / 1.97 / 7.76 / 30.47 | 0.73 / 1.18 / 2.74 / 10.90 |
+| GemLite A16W4 default | 0.87 / 1.33 / 6.99 / 21.65 | 0.95 / 1.89 / 7.35 / 23.99 | 0.40 / 1.76 / 2.85 / 8.03 |
+| bitsandbytes NF4 | 0.84 / 0.88 / 1.94 / 7.26 | 0.89 / 0.95 / 2.28 / 8.24 | 0.89 / 0.90 / 0.92 / 2.52 |
+| GemLite A16W8 autotuned | 0.80 / 0.93 / 5.08 / 19.51 | 0.85 / 1.01 / 4.33 / 16.93 | 0.78 / 0.92 / 1.55 / 5.87 |
+| GemLite A16W4 autotuned | 0.86 / 0.96 / 3.76 / 13.58 | 0.56 / 1.01 / 3.19 / 12.46 | 0.45 / 0.36 / 1.21 / 4.46 |
+| GemLite A8W8 int8 autotuned | 0.99 / 0.54 / 1.58 / 5.19 | 1.03 / 1.29 / 1.56 / 5.19 | 1.00 / 0.99 / 1.49 / 2.05 |
+
+- W8A8 (GemLite A8W8, int8 weights and per-token int8 activations on int8 tensor cores) is the fastest quantized
+  kernel from M = 2,048 up: 1.5 to 2x faster than the current int8 path and faster than bf16. It has a floor of about
+  1 ms per call (activation quantization), so small calls do not gain.
+- GemLite weight-only kernels (A16W8, A16W4) lose at large M even after autotuning; bitsandbytes NF4 is close to the
+  current path everywhere.
+- End-to-end W8A8 with accuracy: `runs/deploy/*_a8w8_int8.json` (pending).
+
 ### 12.1 Explanations on the stitched 9B
 
 `eval/explain_eval.py --n 24 --samples 4 --name explain-9b` (`runs/explain-9b/results.json`): decision recovered from

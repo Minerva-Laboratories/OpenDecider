@@ -16,7 +16,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from .quant import Int8Embedding, Int8Linear, gemlite_quantize_, quantize_int8_
+from .quant import Int8Embedding, Int8Linear, gemlite_a8w8_, gemlite_quantize_, quantize_int8_
 
 
 def _reorder_v_heads(t: torch.Tensor, dim: int, n_a: int, n_b: int, head: int) -> torch.Tensor:
@@ -125,6 +125,8 @@ def load_qwen35_gguf(gguf_path: str, config_dir: str, device: str = "cuda", dtyp
             quantize_int8_(layer)
         elif weight_quant in ("w4", "w8"):
             gemlite_quantize_(layer, 4 if weight_quant == "w4" else 8)
+        elif weight_quant == "a8w8":
+            gemlite_a8w8_(layer)
         elif weight_quant == "awq4":
             from .awq import apply_awq_
             pre = f"{i}."
