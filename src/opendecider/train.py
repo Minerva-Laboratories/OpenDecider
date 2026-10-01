@@ -46,6 +46,8 @@ DEFAULT_TRAIN = dict(
     option_wrap_p=0.0,              # prob. a question gets meaning-preserving option rewordings (verbosity-bias fix)
     data_weights=None,              # optional per-file sampling weights aligned with `data` (else uniform over records)
     consistency_weight=0.0,         # batch-invariance KL for comparative multi-item states
+    consistency_pairs=2,            # pairs per consistency pass (one forward, not micro-batched)
+    consistency_options=0,          # option cap for that pass (0: max_train_options)
     max_train_options=0,            # >0: training-only candidate sampling (keep the answer + random distractors)
     grad_accum=1,                   # optimizer step every `grad_accum` batches of `states_per_step` (grads averaged)
     init_from=None,                 # warm start: load every trunk/head tensor whose name and shape match
@@ -342,13 +344,14 @@ def consistency_step(model, recs, rng, tcfg, max_pairs: int = 2) -> float:
                                                                     "questions": [q]}, q))
     if not pairs:
         return 0.0
-    pairs = rng.sample(pairs, min(max_pairs, len(pairs)))
+    pairs = rng.sample(pairs, min(int(tcfg.get("consistency_pairs") or max_pairs), len(pairs)))
     bb = model.backbone
     seqs = record_tokens(model, [x for b, a, _ in pairs for x in (b, a)], tcfg["max_state_tokens"])
     ids, mask = bb.pad(seqs)
     mem = model.memory_from_ids(ids, mask)
     qs = []
-    cap = int(tcfg.get("max_train_options") or 0)
+    # its own small budget: one un-micro-batched forward with gradients, rows repeat the candidate list
+    cap = int(tcfg.get("consistency_options") or tcfg.get("max_train_options") or 0)
     for i, (_, _, q) in enumerate(pairs):
         opts, lab = list(q["options"]), q["label"]
         if cap and len(opts) > cap:          # same candidate subset for both members of the pair (bounded rows)

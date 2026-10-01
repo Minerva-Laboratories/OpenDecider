@@ -37,11 +37,14 @@ train:
   max_steps: 2500
   lr: 3.0e-4
   warmup: 100
-  states_per_step: 2
+  states_per_step: 1          # long clean-corpus states: one state per pass, gradients accumulated over 2
+  grad_accum: 2
   max_questions_per_state: 6
   max_state_tokens: 768
   option_wrap_p: 0.3
   consistency_weight: 0.5
+  consistency_pairs: 1
+  consistency_options: 8
   max_train_options: 32
   tokens_per_microbatch: 1500
   max_gpu_gb: 20             # leaves the watchdog margin beside the resident llama/cbx/tts servers (~16.5 GB)

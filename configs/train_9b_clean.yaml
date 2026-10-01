@@ -86,3 +86,5 @@ train:
   init_from: runs/x2b-clean-stitch9b/model.pt
   grad_accum: 2
   max_gpu_gb: 48
+  consistency_pairs: 1
+  consistency_options: 8
