@@ -531,6 +531,7 @@ the checkpoint's own codes and scales), `nf4` (bitsandbytes). `graphs` = CUDA-gr
 | 9B int8 / int8 / eager (§11) | 8.557 | 9.814 / 9.946 / 10.985 | 2.642 / 5.423 / 15.228 | 0.602 | 0.260 | 0.869 | 0.750 |
 | 9B int8 / int8 / graphs | 8.557 | 11.407 / 12.716 / 15.107 | 3.266 / 5.836 / 24.456 | 0.600 | 0.260 | 0.869 | 0.750 |
 | 9B w8 / int8 / graphs | 8.560 | 11.371 / 12.664 / 15.038 | 2.995 / 7.700 / 34.887 | 0.576 | 0.265 | 0.863 | 0.767 |
+| 9B w8 / int4 / graphs | 8.560 | 11.355 / 12.599 / 14.779 | 3.076 / 7.765 / 35.047 | 0.588 | 0.257 | 0.869 | 0.767 |
 
 Findings:
 - CUDA graphs do not help. The backbone passes are compute-bound on the Orin, not launch-bound (838 tokens through
