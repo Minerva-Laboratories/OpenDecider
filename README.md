@@ -279,11 +279,14 @@ Environment variables:
 
 - Accuracy trails Jev and Decider 1 on typed-decisions (zero-shot 0.616 vs 0.727 and 0.768).
 - The stitched 9B is slightly below the 2B on prompt-injection detection (0.750 vs 0.767).
-- 4-bit weights (NF4) cost 4 to 8 points on the public sets because the head was trained on int8 features.
+- 4-bit weights cost 4 to 8 points on the public sets with every method tried, AWQ included, because the head was
+  trained on int8 features. Retraining the head on 4-bit features is the planned fix.
 - Tree profiles overfit below about 250 labels. Use `method: "auto"` and let cross-validation choose.
-- Latency is 0.8 to 1.6 s per request on the Orin for states up to about 4k tokens, and 4.4 to 4.9 s at 15k. The target
-  (p50 < 150 ms) needs CUDA graphs and TensorRT, which are not done.
-- Explanations take about 16 s each on the Orin (eager decoding) and can contain small factual slips.
+- Latency is 0.8 to 1.5 s per request on the Orin (2B) for states up to about 4k tokens, and 4.6 s at 15k. The
+  passes are compute-bound: CUDA graphs were measured and made it slower (`docs/RESULTS.md` §12). The levers are
+  fewer FLOPs (question cache, prefix cache, retrieval) and faster quantized GEMMs.
+- Explanations take about 16 s (2B) and 75 s (9B) each on the Orin (eager decoding) and can contain small factual
+  slips.
 - The prefix cache matches the uncached path to within 0.007 to 0.026 in probability (int8 cache boundaries), not
   bit-exactly.
 - Dense retrieval uses mean-pooled backbone states, which is a weak retriever. BM25 is the default.
@@ -296,7 +299,8 @@ Everything below is either running or planned. Results will be added here and in
 
 | Area | Status |
 |---|---|
-| 9B with CUDA graphs and quantized-kernel weights; 9B AWQ | Graphs running. AWQ needs ~8.5 GB of disk; planned on another machine. |
+| Faster quantized GEMMs (GemLite autotuning, int8 activations) and the question-cache row path | Running (`scripts/bench_next.sh`). |
+| 9B AWQ | Needs ~8.5 GB of disk; planned on another machine. |
 | 9B training (warm start from the stitched head) | Planned, on a separate training machine. |
 | GPUs other than the Jetson AGX Orin (desktop and data-center cards, DGX Spark inference) | Planned. All memory and latency numbers are from one Orin 64 GB. |
 | GPU tests in CI | Planned. Unit tests run on CPU with a tiny random model; one GPU test covers the fused attention path. |

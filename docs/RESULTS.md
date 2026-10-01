@@ -508,3 +508,50 @@ Memory and latency, eager (not graphs), int8 weights, one fresh process:
 |---|---|---|---|---|---|---|---|
 | int8 | 8.557 | 9.814 / 9.946 / 10.985 | 2.642 / 5.423 / 15.228 | 281.0 | 0.602 | 0.869 | 0.750 |
 | int4 | 8.557 | 9.809 / 9.919 / 10.985 | 2.714 / 5.565 / 15.546 | 178.7 | 0.588 | 0.869 | 0.750 |
+
+## 12. Deploy benchmark: quantized-kernel weights and CUDA graphs
+
+`scripts/bench_deploy.sh` (one fresh process per config, GPU lock held, nothing else on the GPU). Latency is the
+median of 3 `decide()` calls after a warm-up call per state size; accuracy on the same subsets as §9. Weight modes:
+`int8` (current: int8 weight-only, dequantized then cuBLAS bf16), `w8`/`w4` (GemLite Triton GEMMs, round to
+nearest), `awq` (`cyankiwi/Qwen3.5-2B-AWQ-4bit`, llm-compressor AWQ, int4 group 32, on the GemLite int4 kernel with
+the checkpoint's own codes and scales), `nf4` (bitsandbytes). `graphs` = CUDA-graph engine (`src/opendecider/deploy.py`).
+
+| Model / weights / cache / mode | Weights (GB) | Peak GB, 838 / 3,744 / 14,752 tokens | Latency s, same states | typed acc | typed KL | Banking77 | Injection detection |
+|---|---|---|---|---|---|---|---|
+| 2B int8 / int8 / eager | 1.877 | 2.393 / 2.471 / 3.091 | 0.798 / 1.468 / 4.588 | 0.434 | 0.354 | 0.825 | 0.776 |
+| 2B w8 / int8 / eager | 1.879 | 2.395 / 2.470 / 3.092 | 0.663 / 1.802 / 6.351 | 0.430 | 0.362 | 0.812 | 0.767 |
+| 2B int8 / int4 / graphs | 1.877 | 3.129 / 3.640 / 4.502 | 0.955 / 1.787 / 7.930 | 0.452 | 0.349 | 0.806 | 0.759 |
+| 2B w8 / int8 / graphs | 1.879 | 3.136 / 3.666 / 4.601 | 0.974 / 2.235 / 10.080 | 0.436 | 0.361 | 0.812 | 0.793 |
+| 2B w8 / int4 / graphs | 1.879 | 3.130 / 3.641 / 4.503 | 1.022 / 2.343 / 10.115 | 0.452 | 0.366 | 0.812 | 0.767 |
+| 2B awq / int8 / graphs | 1.319 | 2.577 / 3.106 / 4.041 | 0.902 / 2.006 / 9.261 | 0.420 | 0.372 | 0.750 | 0.776 |
+| 2B awq / int4 / graphs | 1.319 | 2.571 / 3.082 / 3.944 | 0.911 / 2.013 / 9.297 | 0.402 | 0.393 | 0.756 | 0.784 |
+| 2B nf4 / int4 / graphs | 1.258 | 2.509 / 3.022 / 3.884 | 0.787 / 1.623 / 7.803 | 0.414 | 0.367 | 0.775 | 0.698 |
+| 2B w4 / int4 / graphs | 1.317 | 2.569 / 3.080 / 3.941 | 0.915 / 2.013 / 9.240 | 0.408 | 0.364 | 0.744 | 0.707 |
+| 9B int8 / int8 / eager (§11) | 8.557 | 9.814 / 9.946 / 10.985 | 2.642 / 5.423 / 15.228 | 0.602 | 0.260 | 0.869 | 0.750 |
+| 9B int8 / int8 / graphs | 8.557 | 11.407 / 12.716 / 15.107 | 3.266 / 5.836 / 24.456 | 0.600 | 0.260 | 0.869 | 0.750 |
+| 9B w8 / int8 / graphs | 8.560 | 11.371 / 12.664 / 15.038 | 2.995 / 7.700 / 34.887 | 0.576 | 0.265 | 0.863 | 0.767 |
+
+Findings:
+- CUDA graphs do not help. The backbone passes are compute-bound on the Orin, not launch-bound (838 tokens through
+  the 2B is about 3.4 TFLOP). Graphs add bucket padding (up to +28% tokens), and the padded state pass needs an
+  explicit attention mask instead of the causal fast path, so latency and peak memory go up at every size. The
+  engine stays available (`OPENDECIDER_CUDA_GRAPHS=1`) but is off by default. An earlier diagnosis in this file (§10)
+  called short states launch-bound; this measurement contradicts it.
+- GemLite w8 is faster than the current int8 path on short states (0.66 vs 0.80 s) and slower on long ones (6.35 vs
+  4.59 s): its default kernel configs are not tuned for large-M prefill on sm_87.
+- 4-bit weights lose accuracy with every method, AWQ included (Banking77 0.744 to 0.775 vs 0.825 for int8). The
+  trunk and head were trained on int8 features; AWQ lowers the weight error but not enough for an untouched head.
+  Retraining the head on 4-bit features is the fix.
+- The int4 cache keeps accuracy within noise in every configuration.
+
+Follow-ups (scheduled in `scripts/bench_next.sh`): GEMM microbenchmark with GemLite autotuning and A8W8 (int8
+activations on int8 tensor cores) at the real layer shapes (`scripts/bench_gemm.py`), and the question-cache row
+path (`v3_question_cache`, exact: the question is read once per question instead of once per option).
+
+### 12.1 Explanations on the stitched 9B
+
+`eval/explain_eval.py --n 24 --samples 4 --name explain-9b` (`runs/explain-9b/results.json`): decision recovered from
+the masked explanation alone 0.875 (mismatched explanation 0.500); P(decision) from the explanation 0.615 greedy,
+0.792 best of 4 (mismatched 0.372, empty 0.332); removing the top evidence record lowers P(decision) by 0.143
+(mean P(decision) 0.457). Greedy generation takes 75 s per explanation on the Orin (eager decoding of the 9B).
