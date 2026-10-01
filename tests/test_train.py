@@ -201,3 +201,18 @@ def test_warm_start_copies_matching_tensors(bb, tmp_path):
     assert info["loaded"] > 0 and not info["new"] and not info["skipped"]
     for (k, a), b in zip(src.trainable_state_dict().items(), dst.trainable_state_dict().values()):
         assert torch.equal(a, b), k
+
+
+def test_consistency_step_caps_options(bb, monkeypatch):
+    """The batch-invariance pass uses the same training option cap (gold + distractors) as the main loss."""
+    import opendecider.train as T
+    m = make(bb, "v3", v3_features="branched", v3_row_format="answer", slot_emb="none", v3_cross="question").train()
+    seen = []
+    orig = m.run
+    monkeypatch.setattr(m, "run", lambda qs, mem: (seen.extend(len(q.options) for q in qs), orig(qs, mem))[1])
+    opts = [f"intent {i}" for i in range(40)]
+    rec = {"family": "batch_clinc", "context": "batch", "state": {"items": {"item_1": "refund please", "item_2": "reset password"}},
+           "questions": [{"type": "choice", "prompt": "Regarding item_1: which intent does it express?", "options": opts, "label": 7}]}
+    t = dict(T.DEFAULT_TRAIN, max_train_options=8, consistency_weight=0.5)
+    T.consistency_step(m, [rec], random.Random(0), t)
+    assert seen and max(seen) == 8

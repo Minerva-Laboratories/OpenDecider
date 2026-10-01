@@ -348,9 +348,14 @@ def consistency_step(model, recs, rng, tcfg, max_pairs: int = 2) -> float:
     ids, mask = bb.pad(seqs)
     mem = model.memory_from_ids(ids, mask)
     qs = []
+    cap = int(tcfg.get("max_train_options") or 0)
     for i, (_, _, q) in enumerate(pairs):
-        qs.append(Question(q["prompt"], list(q["options"]), q["type"], q["label"], 2 * i))
-        qs.append(Question(q["prompt"], list(q["options"]), q["type"], q["label"], 2 * i + 1))
+        opts, lab = list(q["options"]), q["label"]
+        if cap and len(opts) > cap:          # same candidate subset for both members of the pair (bounded rows)
+            keep = sorted([lab] + rng.sample([j for j in range(len(opts)) if j != lab], cap - 1))
+            opts, lab = [opts[j] for j in keep], keep.index(lab)
+        qs.append(Question(q["prompt"], opts, q["type"], lab, 2 * i))
+        qs.append(Question(q["prompt"], opts, q["type"], lab, 2 * i + 1))
     with torch.autocast("cuda", dtype=torch.bfloat16, enabled=tcfg.get("autocast_bf16", False) and torch.cuda.is_available()):
         _, out = model.run(qs, mem)
     lp = torch.log_softmax(out.logits.float().masked_fill(~out.opt_mask, -1e9), -1)
