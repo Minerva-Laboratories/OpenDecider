@@ -100,7 +100,7 @@ def cmd_fit(a):
     T = torch.load(a.targets, weights_only=False)
     layers = [int(x) if x.isdigit() else x for x in a.layers.split(",")]
     bcfg = BackboneConfig(**{**ck["backbone_cfg"], "path": a.backbone_path, "feature_layers": layers,
-                             "weight_quant": "int8", "repo_id": a.repo_id, "revision": a.revision})
+                             "weight_quant": a.weight_quant, "repo_id": a.repo_id, "revision": a.revision})
     bb = Backbone.load(bcfg)
     mcfg = dict(ck["model_cfg"])
     d_a = ck["state_dict"]["proj_option.weight"].shape[1]
@@ -162,6 +162,7 @@ def main():
     f = sub.add_parser("fit"); f.add_argument("--ckpt", required=True); f.add_argument("--targets", required=True)
     f.add_argument("--backbone-path", required=True); f.add_argument("--layers", default="8,16,24,final")
     f.add_argument("--out", required=True)
+    f.add_argument("--weight-quant", default="int8", help="backbone weight mode the stitch is fitted on (e.g. awq)")
     f.add_argument("--repo-id", default="Qwen/Qwen3.5-9B")            # provenance of the target backbone
     f.add_argument("--revision", default="c202236235762e1c871ad0ccb60c8ee5ba337b9a")
     a = ap.parse_args()

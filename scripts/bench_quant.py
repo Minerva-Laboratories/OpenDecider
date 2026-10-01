@@ -34,7 +34,7 @@ from opendecider.formatting import record_state_text  # noqa: E402
 from opendecider.guards import gpu_lock  # noqa: E402
 
 GB = 2 ** 30
-AWQ = {"Qwen/Qwen3.5-2B": "configs/backbone_2b_awq.yaml"}
+AWQ = {"Qwen/Qwen3.5-2B": "configs/backbone_2b_awq.yaml", "Qwen/Qwen3.5-9B": "configs/backbone_9b_awq.yaml"}
 
 
 def logits(model, state_text, qs):
@@ -87,7 +87,8 @@ def main():
             graphs, qcache = "graphs" in mode, "qcache" in mode
             torch.cuda.empty_cache(); torch.cuda.reset_peak_memory_stats()
             over = {"weight_quant": w, "kv_quant": kv}
-            if w == "awq":                  # pre-quantized AWQ checkpoint for this backbone (configs/*_awq.yaml)
+            if w == "awq" and ck["backbone_cfg"].get("weight_quant") != "awq":   # checkpoint not already on AWQ:
+                # use the pre-quantized AWQ checkpoint for this backbone (configs/*_awq.yaml)
                 import yaml
                 over.update({k: v for k, v in yaml.safe_load(open(AWQ[ck["backbone_cfg"]["repo_id"]])).items()
                              if k in ("path", "repo_id", "revision")})

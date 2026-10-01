@@ -1,0 +1,11 @@
+# Qwen3.5-9B from the original bf16 weights (Qwen/Qwen3.5-9B@c202236235, Apache-2.0), int8 at load: the `int8` variant
+# of the 9B release (the default variant reads the Q4_0 GGUF instead).
+path: models/Qwen__Qwen3.5-9B@c20223623576
+repo_id: Qwen/Qwen3.5-9B
+revision: c202236235762e1c871ad0ccb60c8ee5ba337b9a
+dtype: bfloat16
+weight_quant: int8
+kv_quant: int8
+quantize_linear_state: false
+feature_layers: [8, 16, 24, final]
+device: cuda
