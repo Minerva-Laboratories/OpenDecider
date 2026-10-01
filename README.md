@@ -331,7 +331,7 @@ Everything below is either running or planned. Results will be added here and in
 
 | Area | Status |
 |---|---|
-| Faster quantized GEMMs (GemLite autotuning, int8 activations) and the question-cache row path | Running (`scripts/bench_next.sh`). |
+| W8A8 without the accuracy loss (SmoothQuant-style calibration) | Planned. W8A8 is 2.5x faster on the 9B at 0.8k tokens but loses 5 to 6 points; see `docs/RESULTS.md` §12. |
 | 9B AWQ | Needs ~8.5 GB of disk; planned on another machine. |
 | 9B training (warm start from the stitched head) | Planned, on a separate training machine. |
 | GPUs other than the Jetson AGX Orin (desktop and data-center cards, DGX Spark inference) | Planned. All memory and latency numbers are from one Orin 64 GB. |

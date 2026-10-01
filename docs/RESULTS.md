@@ -532,6 +532,8 @@ the checkpoint's own codes and scales), `nf4` (bitsandbytes). `graphs` = CUDA-gr
 | 9B int8 / int8 / graphs | 8.557 | 11.407 / 12.716 / 15.107 | 3.266 / 5.836 / 24.456 | 0.600 | 0.260 | 0.869 | 0.750 |
 | 9B w8 / int8 / graphs | 8.560 | 11.371 / 12.664 / 15.038 | 2.995 / 7.700 / 34.887 | 0.576 | 0.265 | 0.863 | 0.767 |
 | 9B w8 / int4 / graphs | 8.560 | 11.355 / 12.599 / 14.779 | 3.076 / 7.765 / 35.047 | 0.588 | 0.257 | 0.869 | 0.767 |
+| 2B a8w8 / int8 / eager | 1.879 | 2.393 / 2.470 / 3.091 | 0.700 / 1.259 / 4.166 | 0.432 | 0.352 | 0.775 | 0.759 |
+| 9B a8w8 / int8 / eager | 8.560 | 9.71 / 9.85 / 10.99 | 1.07 / 2.67 / 10.19 | 0.544 | 0.278 | 0.856 | 0.698 |
 | 2B int8 / int8 / question cache | 1.877 | 2.332 / 2.400 / 3.091 | 1.796 / 2.452 / 5.618 | 0.444 | 0.352 | 0.825 | 0.776 |
 | 2B w8 / int8 / question cache | 1.879 | 2.333 / 2.402 / 3.092 | 2.167 / 3.254 / 7.855 | 0.426 | 0.360 | 0.819 | 0.784 |
 | 9B int8 / int8 / question cache | 8.557 | 9.5 / 9.67 / 10.99 | 5.54 / 8.41 / 18.41 | 0.596 | 0.260 | 0.869 | 0.733 |
@@ -582,7 +584,11 @@ reference.
   1 ms per call (activation quantization), so small calls do not gain.
 - GemLite weight-only kernels (A16W8, A16W4) lose at large M even after autotuning; bitsandbytes NF4 is close to the
   current path everywhere.
-- End-to-end W8A8 with accuracy: `runs/deploy/*_a8w8_int8.json` (pending).
+- End-to-end W8A8 (`a8w8` rows in the table above): 10 to 14% faster on the 2B and 1.5 to 2.5x faster on the 9B
+  (1.07 vs 2.64 s at 838 tokens), with the same peak memory. Per-token int8 activations cost accuracy: 2B Banking77
+  0.775 vs 0.825; 9B typed-decisions 0.544 vs 0.602 and injection detection 0.698 vs 0.750. Next step: SmoothQuant-
+  style calibration (per-channel scales that move activation outliers into the weights) before quantizing, using
+  the activation recorder in `src/opendecider/awq.py`; or retraining the head on these features.
 
 ### 12.1 Explanations on the stitched 9B
 
