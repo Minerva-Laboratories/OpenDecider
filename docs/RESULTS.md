@@ -548,6 +548,9 @@ Findings:
 Follow-ups (scheduled in `scripts/bench_next.sh`): GEMM microbenchmark with GemLite autotuning and A8W8 (int8
 activations on int8 tensor cores) at the real layer shapes (`scripts/bench_gemm.py`), and the question-cache row
 path (`v3_question_cache`, exact: the question is read once per question instead of once per option).
+Next after those: optimized decoding for `/v1/explain` (reuse the decision's state cache instead of re-reading the
+prompt, a quantized GEMM for the LM head instead of dequantizing it per token, and a CUDA-graph decode step: single-
+token decoding is launch-bound, unlike the prefill measured above), then re-measure explanation latency.
 
 ### 12.1 Explanations on the stitched 9B
 

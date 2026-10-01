@@ -309,7 +309,7 @@ Everything below is either running or planned. Results will be added here and in
 | Robustness to prompt injection inside a state (not detection) | Planned. |
 | Behavioral probe battery on Jev itself | Blocked on API access. |
 | Retrieval store inside `/v1/decide`, and a dedicated embedding model | Planned. The store is a library with a synthetic recall benchmark. |
-| Explanations: human review, prefix-cache reuse, faster decoding | Planned. |
+| Explanations: optimized decoding (state reused from the prefix cache, quantized LM-head GEMM, CUDA-graph decode step) and human review | Planned, after the kernel follow-ups. Current: 16 s (2B) and 75 s (9B) per explanation. |
 | More than 255 options (two-stage path) at scale | Planned. Implemented and unit-tested, not benchmarked. |
 | Languages other than English | Planned. |
 
