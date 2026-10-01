@@ -1,7 +1,8 @@
 """CUDA-graph inference engine for V3 branched models (single-state requests).
 
-Eager inference on the Orin is launch-bound for short states: thousands of small kernels per backbone pass. The
-engine captures the two backbone passes as CUDA graphs over bucketed shapes and replays them:
+Measured result (docs/RESULTS.md §12): on the Orin the backbone passes are compute-bound, and this engine is SLOWER
+than eager (bucket padding, explicit masks instead of the causal fast path), so it is off by default. It is kept for
+GPUs where launch overhead dominates. It captures the two backbone passes as CUDA graphs over bucketed shapes:
   state pass : key T_b (state tokens rounded up to a bucket). The state is LEFT-padded: pads leave the GDN
                recurrent/conv state at zero and are masked in attention, so bucketing is exact.
   option rows: key (T_b, R_b, L_b). The shared prefix K/V (dequantized once), the prefix mask and each row's GDN
