@@ -43,7 +43,8 @@ train:
   option_wrap_p: 0.3
   consistency_weight: 0.5
   max_train_options: 32
-  tokens_per_microbatch: 2000
+  tokens_per_microbatch: 1500
+  max_gpu_gb: 20             # leaves the watchdog margin beside the resident llama/cbx/tts servers (~16.5 GB)
   backbone_weight_quant: null     # train on the deployed (int8) backbone, not bf16
   none_p: 0.3
   none_drop_p: 0.25
