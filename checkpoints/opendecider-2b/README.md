@@ -83,3 +83,5 @@ The weights in this checkpoint are released under Apache-2.0, like the code. Fou
 (share-alike). Whether trained weights are "adapted material" under CC-BY-SA is legally unsettled; this head is a
 classifier that does not generate text and cannot reproduce its training sentences. If that matters for your use,
 consult your own counsel. The backbone keeps its own license (Apache-2.0 for every variant listed above).
+
+These checkpoints will be retrained without the CC-BY-SA datasets and re-released with clean provenance.

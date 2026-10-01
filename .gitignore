@@ -21,3 +21,6 @@ CLAUDE.md
 
 # released checkpoints are tracked (fp16 shards under 50 MB)
 !checkpoints/**/*.safetensors
+
+# local job-queue helpers (machine-specific)
+scripts/queue_*.sh

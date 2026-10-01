@@ -3,7 +3,7 @@
     .venv/bin/python scripts/bench_gemm.py
 
 Kernels: bf16 cuBLAS (reference), int8 weight-only as currently shipped (dequantize, then cuBLAS), GemLite A16W8
-with default and autotuned ("max") configs, GemLite A8W8 (dynamic per-token int8 activations, int8 tensor cores),
+with default and autotuned ("fast") configs, GemLite A8W8 (dynamic per-token int8 activations, int8 tensor cores),
 GemLite A16W4 and bitsandbytes NF4. M = tokens per call (row pass ~64-400, state pass up to 16k).
 """
 import copy
@@ -57,7 +57,7 @@ def main():
             res = {}
             for name, m in kern.items():
                 res[name] = [bench(lambda m=m, M=M: m(X[M])) for M in MS]
-            gemlite.set_autotune("max")
+            gemlite.set_autotune("fast")                            # "max" takes hours per shape on the Orin
             for name, mk in (("GemLite A16W8 autotuned", lambda: gemlite_linear(lin, 8)),
                              ("GemLite A16W4 autotuned", lambda: gemlite_linear(lin, 4)),
                              ("GemLite A8W8 int8 autotuned",          # from_linear may quantize in place: use a copy
