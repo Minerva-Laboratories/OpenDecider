@@ -223,17 +223,45 @@ free and refuses downloads that would go below that.
 ```bash
 git clone https://github.com/Minerva-Laboratories/OpenDecider.git
 cd OpenDecider
-python3.12 -m venv .venv && .venv/bin/pip install -e ".[eval]"
+python3.12 -m venv .venv && .venv/bin/pip install -e ".[gguf,quant]"
 
-# download the pinned backbone (checks free disk first)
-.venv/bin/python -m opendecider.fetch --repo Qwen/Qwen3.5-2B \
-    --revision 15852e8c16360a2fea060d615a32b45270f8a8fc --out models/qwen3.5-2b
+# run the 2B checkpoint in-process (downloads the pinned Qwen3.5-2B backbone, 4.3 GB, on first run)
+.venv/bin/python examples/quickstart.py
 
-# serve a trained checkpoint on 127.0.0.1:8000
-OPENDECIDER_CKPT=runs/x2b/model.pt .venv/bin/python -m opendecider.api
+# or serve it on 127.0.0.1:8000 and send a request
+.venv/bin/python -m opendecider.serve --model checkpoints/opendecider-2b &
+bash examples/request.sh
 ```
 
-Checkpoints are not in the repository yet. See [Reproduce](#reproduce) to train or stitch one.
+Expected output of the quickstart (2B, int8 backbone):
+
+```text
+route     -> refund     (billing: ..., technical: ..., refund: ..., other: ...)  none: ...
+urgent    -> ...
+severity  -> ...
+```
+
+Backbones are cached under `models/` (or `$OPENDECIDER_MODELS`). Every download checks that at least 4 GB of disk
+stays free. Without a CUDA GPU the `int8` variant runs on CPU with reference kernels (slow).
+
+## Checkpoints
+
+Both checkpoints are in this repository under `checkpoints/` (fp16 safetensors, shards under 50 MB, no Git LFS).
+They contain only what was trained; the frozen backbone is downloaded from its original repository at a pinned
+revision. Each folder has a model card (`README.md`) with results and data licenses.
+
+| Checkpoint | Trained part | Backbone variants (`backbone=`) | Zero-shot typed-decisions |
+|---|---|---|---|
+| `checkpoints/opendecider-2b` | 25.4M parameters, 48 MB | `int8` (default), `w8`, `nf4`, `awq` | 0.577 |
+| `checkpoints/opendecider-9b-stitched` | 57.3M parameters, 109 MB | `gguf-q4_0` (default), `int8` | 0.643 |
+
+```python
+from opendecider.hub import load_decider
+dec = load_decider("checkpoints/opendecider-9b-stitched")    # Q4_0 GGUF backbone from unsloth/Qwen3.5-9B-MTP-GGUF
+dec = load_decider("checkpoints/opendecider-2b", backbone="awq", kv_quant="int4")
+```
+
+4-bit backbone variants (`awq`, `nf4`) lose 4 to 8 points on the public sets: the head was trained on int8 features.
 
 ## API
 
@@ -268,7 +296,8 @@ Environment variables:
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `OPENDECIDER_CKPT` | – | Checkpoint to serve. |
+| `OPENDECIDER_CKPT` | – | Run checkpoint (`runs/*/model.pt`) for `python -m opendecider.api`. Released checkpoints use `python -m opendecider.serve --model`. |
+| `OPENDECIDER_MODELS` | `models` | Backbone download cache. |
 | `OPENDECIDER_STATE_CACHE_MB` | `2048` | Prefix cache size. `0` turns it off. |
 | `OPENDECIDER_NONE_TEXT` | `none of the above` | Text of the `none` option. Empty turns it off. |
 | `HOST`, `PORT` | `127.0.0.1`, `8000` | Bind address. |
@@ -319,6 +348,7 @@ Everything below is either running or planned. Results will be added here and in
 - [x] Automatic calibrator selection in `/v1/calibrate`.
 - [x] `none` option ("none of the above", no training needed).
 - [x] Retrieval store (BM25 + dense) and `/v1/explain`.
+- [x] Released checkpoints (2B, 9B stitched) with pinned backbone variants.
 - [ ] Warm-start 9B training from the stitched checkpoint.
 - [ ] Conformal prediction sets and abstention in the API.
 - [ ] Consistency constraints across questions.
@@ -361,6 +391,8 @@ configs/           backbone and model configs (pinned revisions)
 data/              dataset builders and MANIFEST.md (licenses)
 docs/              results, landscape survey, designs, figures, logo
 tests/             CPU unit tests (tiny random Qwen3.5-architecture model)
+checkpoints/       released heads (safetensors + config + model card)
+examples/          quickstart.py, request.sh
 ```
 
 ## Background
@@ -371,5 +403,8 @@ Jev is a product of TypeSafe. This project is not affiliated with TypeSafe.
 
 ## License
 
-Code: [Apache-2.0](LICENSE). See [`NOTICE`](NOTICE).
-Backbone weights and datasets keep their own licenses. See [`data/MANIFEST.md`](data/MANIFEST.md).
+Code and released checkpoint weights: [Apache-2.0](LICENSE). See [`NOTICE`](NOTICE).
+The backbones (Qwen3.5 and the listed quantizations) are Apache-2.0 and are downloaded from their own repositories.
+The heads were trained on datasets listed with their licenses in [`data/MANIFEST.md`](data/MANIFEST.md) and in each
+model card. Four of them are CC-BY-SA; whether trained weights count as adapted material under share-alike terms is
+legally unsettled (the heads are classifiers and do not generate text).

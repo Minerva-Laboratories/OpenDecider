@@ -9,6 +9,8 @@ dependencies = ["torch>=2.10", "transformers>=5.2", "pyyaml", "numpy", "fastapi"
 
 [project.optional-dependencies]
 eval = ["lightgbm>=4", "matplotlib"]
+quant = ["gemlite>=0.6", "bitsandbytes>=0.45"]      # w8 / w4 / awq / nf4 backbone variants (CUDA)
+gguf = ["gguf>=0.19"]                               # 9B backbone from the Q4_0 GGUF
 
 [tool.setuptools.packages.find]
 where = ["src"]
