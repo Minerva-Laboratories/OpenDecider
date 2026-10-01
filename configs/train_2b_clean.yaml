@@ -25,7 +25,7 @@ train:
          data/clean_train/injection_train.jsonl, data/clean_train/harmful_train.jsonl,
          data/clean_train/ordinal_train.jsonl, data/clean_train/kept_context_train.jsonl,
          data/synthetic/uncertainty_train.jsonl]
-  data_weights: [0.15, 0.15, 0.08, 0.10, 0.06, 0.06, 0.08, 0.07, 0.02, 0.05, 0.12, 0.06]
+  data_weights: [0.15, 0.15, 0.08, 0.10, 0.06, 0.06, 0.02, 0.13, 0.02, 0.05, 0.12, 0.06]   # kept_injection = Gandalf only
   val: [data/synthetic/val.jsonl, data/clean_train/kept_public_val.jsonl, data/clean_train/topics_val.jsonl,
         data/clean_train/reading_val.jsonl, data/clean_train/knowledge_val.jsonl, data/clean_train/kept_injection_val.jsonl,
         data/clean_train/injection_val.jsonl, data/clean_train/ordinal_val.jsonl]

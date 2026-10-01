@@ -94,3 +94,44 @@ Excluded (license unknown/other/NC): social_i_qa, piqa, hellaswag, swag, art, ri
 - LocalLLaMA/typed-decisions@f7a2487edd7a (Apache-2.0): 400 test cases × 5 typed questions; gold = mean of 3 teacher
   samples. Downloaded to `data/typed_decisions/` (gitignored). **Eval only**: its train split is used solely to fit
   decision-profile weights (out-of-fold), never to train the model.
+
+### 2026-10-01: clean-provenance TRAINING corpus (`data/builders/clean_train.py` → `data/clean_train/`, not redistributed)
+For the retrained checkpoints: no share-alike, non-commercial, ND, copyleft, unknown-license or gated sources, and no
+LLM-generated texts or labels. Licenses checked on each card at the pinned sha AND at the upstream source (stricter one
+binding). Full candidate review (with ~50 rejected sets and reasons): kept with the builder's revisions.json.
+Contamination: normalised exact match + any shared 13-word span against every held-out benchmark file and all splits
+of deepset/prompt-injections.
+
+Kept from the earlier corpus: clinc_oos, massive, winogrande, qasc, cosmos_qa, quartz, StrategyQA, Gandalf, and the
+clinc/massive in-context items. Dropped: boolq, snli, ai2_arc, dbpedia_14, ScienceQA (CC-BY-SA), and after an upstream
+audit of the injection sets:
+- reshabhs/SPML_Chatbot_Prompt_Injection: system and user prompts written by GPT-4 (card, method section).
+- neuralchemy/Prompt-injection-dataset: mixes undocumented "v1" data, gated hackaprompt rows, JailbreakBench
+  judge-comparison prompts (partly written by an attacker LLM) and AdvBench goals (LLM-generated).
+- jackhhao/jailbreak-classification: benign rows from GPTeacher ("100% GPT4 generated").
+- GuardrailsAI/detect-jailbreak: relabels verazuo rows with an undocumented auto-tagger; its clean part (verazuo's MIT
+  prompts) is taken directly via TrustAIRLab, labelled by source file.
+- in-context items built from those pools.
+
+New sources (pinned revisions in the builder; all verified 2026-10-01):
+| Source | License | Use | Notes |
+|---|---|---|---|
+| jaredfern/codah@4b0e0e7f33 | ODC-BY | commonsense MC | |
+| pkavumba/balanced-copa@813bd03cd6 | CC-BY-4.0 (COPA: BSD-2) | causal MC | |
+| deepmind/aqua_rat@33301c6a05 (raw) | Apache-2.0 | algebra MC | rationale never shown |
+| coastalcph/lex_glue@c23fdff1a6 case_hold, ledgar | CC-BY-4.0 (CaseHOLD Apache-2.0; LEDGAR MIT) | legal MC; 100-class topic | case text from the Caselaw Access Project, unrestricted since 2024-03 |
+| gfissore/arxiv-abstracts-2021@e4c5fbd4de | CC0 (arXiv metadata terms) | ~150-class topic | title + abstract only |
+| theatticusproject/cuad@a3c393f5d1 | CC-BY-4.0 (data, labels) | clause presence yes/no, absent-clause negatives | contract text: EDGAR filings, no license representation by the authors; never redistribute excerpts |
+| allenai/csqa2 (GitHub @3f57a4a6a1) | CC-BY-4.0 | commonsense yes/no | ConceptNet prompt fields dropped (CC-BY-SA) |
+| tasksource/ruletaker@a3e0880bae | Apache-2.0 | rule entailment yes/no | programmatic labels |
+| tommccoy1/hans (GitHub @7299f6f657) | MIT | NLI yes/no | HF mirror says "unknown": not used |
+| TrustAIRLab/in-the-wild-jailbreak-prompts@a10aab8eff | MIT | jailbreak vs regular prompts | posts scraped from public prompt communities |
+| microsoft/llmail-inject-challenge@1063bdf01e | MIT | indirect injection in emails | raw human submissions only (never the LLM-judge labels); benign mailboxes are programmatic templates |
+| paul-rottger/xstest (GitHub @d7bb5bd738) | CC-BY-4.0 | harmful-request yes/no | HF copy gated: not used |
+| JailbreakBench/JBB-Behaviors@886acc352a | MIT | harmful-request yes/no | AdvBench rows dropped (LLM-generated) |
+| OpenAssistant/oasst1@fdf72ae082 | Apache-2.0 | benign prompts; human quality/helpfulness ratings (ordinal) | synthetic rows and the detoxify column excluded |
+| google/civil_comments@f2970eb3a5 | CC0 | toxicity (ordinal) | |
+Excluded after review (selection): SciNLI (CC-BY-SA upstream), MultiNLI (SA/other), WANLI (GPT-3 text), ContractNLI
+(NC-SA), SciTail (no license), ConditionalQA/DROP/Belebele (SA), CondaQA/ROPES/Qasper (upstream text rights), PIQA
+(AFL-3.0), MedMCQA (question copyright unclear), HelpSteer2 (LLM-written responses). bigscience/P3 and
+allenai/natural-instructions are struck from the candidate list above: they contain held-out benchmark tasks.

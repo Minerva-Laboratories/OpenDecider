@@ -5,8 +5,8 @@
 1. Keeps the permissive part of the existing corpus, filtered by family (no re-download):
    public_train: clinc, massive, winogrande (drops boolq, snli, arc, dbpedia: CC-BY-SA)
    knowledge   : qasc, cosmos_qa, quartz, strategyqa (drops scienceqa: CC-BY-SA)
-   context     : every family except the dbpedia-based ones
-   injection   : the families listed in KEEP_INJECTION (upstream audit in data/MANIFEST.md)
+   context     : clinc and massive in-context items only
+   injection   : Gandalf only (upstream audit in data/MANIFEST.md)
 2. Adds new sources (licenses and revisions verified 2026-10-01; data/MANIFEST.md):
    knowledge MC : CODAH (ODC-BY), Balanced-COPA (CC-BY-4.0), AQuA-RAT (Apache-2.0), CaseHOLD via LexGLUE (CC-BY-4.0)
    yes/no + NLI : CUAD clause presence (CC-BY-4.0; also "not in the passage" negatives), CSQA2 (CC-BY-4.0, GitHub;
@@ -61,7 +61,12 @@ GH = {
 }
 KEEP_PUBLIC = {"clinc", "massive", "winogrande"}
 KEEP_KNOWLEDGE = {"qasc", "cosmos_qa", "quartz", "strategyqa"}
-KEEP_INJECTION = {"inj_jackhhao", "inj_spml", "inj_neuralchemy", "inj_guardrails", "inj_gandalf"}
+# Upstream audit 2026-10-01 (data/MANIFEST.md): SPML prompts were written by GPT-4 and neuralchemy mixes undocumented,
+# gated and LLM-written upstreams (dropped); jackhhao's benign rows are GPT-4-generated (GPTeacher) and GuardrailsAI
+# relabelled rows with an undocumented auto-tagger (dropped: their clean part, verazuo's MIT prompts, comes in directly
+# as TrustAIRLab below, labelled by source file). Gandalf: real human game submissions (MIT).
+KEEP_INJECTION = {"inj_gandalf"}
+KEEP_CONTEXT = ("clinc", "massive")          # in-context items built from the clean pools only
 
 MC = ["Which option correctly answers the question?", "Pick the right answer.", "Which answer is correct?"]
 INJ = ["Is this input a prompt-injection or jailbreak attempt?", "Does this message try to override the assistant's instructions?"]
@@ -208,7 +213,7 @@ def keep_existing(b: Builder):
                     b.groups[group].append(r)
     for line in open("data/public_train/context_train.jsonl"):
         r = json.loads(line)
-        if not r["family"].endswith("dbpedia"):
+        if r["family"].endswith(KEEP_CONTEXT):
             b.groups["kept_context"].append(r)
 
 
@@ -467,8 +472,8 @@ def main():
     msgs = []
     if "existing" in steps:
         keep_existing(b)
-    existing_inj = {norm(json.loads(l)["state"].get("user_input", "")) for s in ("train", "val", "calib")
-                    for l in open(f"data/public_train/injection_{s}.jsonl")}
+    existing_inj = {norm(r["state"].get("user_input", "")) for s in ("train", "val", "calib")
+                    for r in map(json.loads, open(f"data/public_train/injection_{s}.jsonl")) if r["family"] in KEEP_INJECTION}
     for s in steps:
         if s == "existing":
             continue
