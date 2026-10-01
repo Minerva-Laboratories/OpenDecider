@@ -90,7 +90,7 @@ def _fetch(repo: str, revision: str, patterns=None, filename: str | None = None)
             (not filename and (patterns is None or any(s.rfilename.endswith(p.lstrip("*")) for p in patterns)))]
     missing = [s for s in want if not os.path.exists(os.path.join(d, s.rfilename))]
     if missing:
-        require_free_gb(sum((s.size or 0) for s in missing) / 2 ** 30 + 0.2)
+        require_free_gb(sum((s.size or 0) for s in missing) / 2 ** 30 + 0.2, path=d)
         if filename:
             hf_hub_download(repo, filename, revision=revision, local_dir=d)
         else:

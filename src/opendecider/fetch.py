@@ -23,7 +23,7 @@ def main(argv=None):
     a = ap.parse_args(argv)
     info = HfApi().model_info(a.repo, revision=a.revision, files_metadata=True)
     total = sum((s.size or 0) for s in info.siblings) / 2**30
-    free = require_free_gb(total + 0.5)
+    free = require_free_gb(total + 0.5, path=a.out)
     print(f"{a.repo}@{info.sha}: {total:.2f} GB, {free:.1f} GB free -> OK")
     snapshot_download(a.repo, revision=info.sha, local_dir=a.out, ignore_patterns=SKIP)
     print(f"pinned revision: {info.sha}")

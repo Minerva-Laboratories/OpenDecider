@@ -12,7 +12,7 @@ data/synthetic/*.jsonl
 data/public/
 data/public_train/
 data/clean_train/
-models/
+models
 data/public_context/
 data/typed_decisions/
 

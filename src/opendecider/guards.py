@@ -22,7 +22,11 @@ GPU_OWNER_PATH = "/tmp/qwen-surgery-gpu.owner"
 
 
 def free_gb(path: str = "/") -> float:
-    return shutil.disk_usage(path).free / 2**30
+    """Free space of the filesystem that holds `path` (or its nearest existing parent: the target may not exist yet)."""
+    p = os.path.abspath(path)
+    while not os.path.exists(p):
+        p = os.path.dirname(p)
+    return shutil.disk_usage(p).free / 2**30
 
 
 def require_free_gb(expected_write_gb: float = 0.0, path: str = "/", floor: float = DISK_FLOOR_GB) -> float:
