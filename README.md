@@ -158,10 +158,14 @@ The decision model re-reads only the explanation, with every option name masked,
 
 | Check | Value |
 |---|---|
-| Decision recovered from the explanation alone (greedy) | 83% (mismatched explanation: 29%) |
-| P(decision) from the explanation alone, greedy / best of 4 | 0.67 / 0.88 (mismatched: 0.30, empty: 0.28) |
-| Drop in P(decision) when the top cited record is removed | 0.25 (mean P(decision): 0.51) |
-| Latency per greedy explanation, Orin | 16.5 s median (eager generation, not optimized) |
+| Decision recovered from the explanation alone (greedy) | 79% (mismatched explanation: 29%) |
+| P(decision) from the explanation alone, greedy / best of 4 | 0.72 / 0.87 (mismatched: 0.32, empty: 0.29) |
+| Drop in P(decision) when the top cited record is removed | 0.26 (mean P(decision): 0.52) |
+| Latency per greedy explanation, Orin, warm | 7.9 s median: evidence 4.7 s, decoding 2.4 s (about 70 tokens), check 0.7 s |
+
+Decoding uses a static cache, a CUDA-graph decode step and a packed 8-bit LM head (`docs/RESULTS.md` §12.3). It was
+16.5 s per explanation before. The first request at a new input length is slower (10 to 90 s) while GemLite tunes its
+kernels for that shape. The 9B takes 24.6 s (was 75 s).
 
 ### Prefix cache (Jetson AGX Orin, 2B backbone)
 
@@ -317,8 +321,8 @@ Environment variables:
 - Latency is 0.8 to 1.5 s per request on the Orin (2B) for states up to about 4k tokens, and 4.6 s at 15k. The
   passes are compute-bound: CUDA graphs were measured and made it slower (`docs/RESULTS.md` §12). The levers are
   fewer FLOPs (question cache, prefix cache, retrieval) and faster quantized GEMMs.
-- Explanations take about 16 s (2B) and 75 s (9B) each on the Orin (eager decoding) and can contain small factual
-  slips.
+- Explanations take about 8 s (2B) and 25 s (9B) each on the Orin once kernels are tuned, and can contain small
+  factual slips. Most of the time is the evidence pass (one decision per removed record), not decoding.
 - The prefix cache matches the uncached path to within 0.007 to 0.026 in probability (int8 cache boundaries), not
   bit-exactly.
 - Dense retrieval uses mean-pooled backbone states, which is a weak retriever. BM25 is the default.
@@ -341,7 +345,7 @@ Everything below is either running or planned. Results will be added here and in
 | Robustness to prompt injection inside a state (not detection) | Planned. |
 | Behavioral probe battery on Jev itself | Blocked on API access. |
 | Retrieval store inside `/v1/decide`, and a dedicated embedding model | Planned. The store is a library with a synthetic recall benchmark. |
-| Explanations: optimized decoding (state reused from the prefix cache, quantized LM-head GEMM, CUDA-graph decode step) and human review | Planned, after the kernel follow-ups. Current: 16 s (2B) and 75 s (9B) per explanation. |
+| Explanations: faster evidence pass (reuse the shared state prefix across the removed-record copies), saved kernel tuning, human review | Planned. Decoding is optimized; current: 7.9 s (2B) and 24.6 s (9B) per explanation, warm. |
 | More than 255 options (two-stage path) at scale | Planned. Implemented and unit-tested, not benchmarked. |
 | Languages other than English | Planned. |
 

@@ -558,9 +558,7 @@ Findings:
 Follow-ups (scheduled in `scripts/bench_next.sh`): GEMM microbenchmark with GemLite autotuning and A8W8 (int8
 activations on int8 tensor cores) at the real layer shapes (`scripts/bench_gemm.py`), and the question-cache row
 path (`v3_question_cache`, exact: the question is read once per question instead of once per option).
-Next after those: optimized decoding for `/v1/explain` (reuse the decision's state cache instead of re-reading the
-prompt, a quantized GEMM for the LM head instead of dequantizing it per token, and a CUDA-graph decode step: single-
-token decoding is launch-bound, unlike the prefill measured above), then re-measure explanation latency.
+Optimized explanation decoding: §12.3.
 
 
 ### 12.2 GEMM kernels at the 2B layer shapes
@@ -595,4 +593,47 @@ reference.
 `eval/explain_eval.py --n 24 --samples 4 --name explain-9b` (`runs/explain-9b/results.json`): decision recovered from
 the masked explanation alone 0.875 (mismatched explanation 0.500); P(decision) from the explanation 0.615 greedy,
 0.792 best of 4 (mismatched 0.372, empty 0.332); removing the top evidence record lowers P(decision) by 0.143
-(mean P(decision) 0.457). Greedy generation takes 75 s per explanation on the Orin (eager decoding of the 9B).
+(mean P(decision) 0.457). Greedy generation took 75 s per explanation with eager decoding; with the optimized decoder
+(§12.3) the same evaluation gives a 30.6 s median.
+
+### 12.3 Explanation decoding
+
+`/v1/explain` generation now uses a static KV cache, the decode step (backbone + LM head) captured as one CUDA graph,
+and the LM head packed once as a GemLite A16W8 GEMM instead of dequantizing the int8 table per token. Each sequence
+stops at the end of its first line of content. Backbone weights: GemLite `w8`. Graph and eager decoding give the same
+greedy text (checked on a real explanation prompt).
+
+Quality and latency, `eval/explain_eval.py --n 24 --samples 4 --weight-quant w8` (`runs/explain-2b-fast`,
+`runs/explain-9b-fast`; released checkpoints; single runs, no confidence intervals yet):
+
+| | 2B | 9B (stitched) |
+|---|---|---|
+| Decision recovered from the explanation alone (greedy) | 0.792 (mismatched 0.292) | 0.917 (mismatched 0.375) |
+| P(decision) from the explanation, greedy / best of 4 | 0.717 / 0.873 | 0.683 / 0.760 |
+| Same, mismatched / empty state | 0.318 / 0.293 | 0.341 / 0.309 |
+| Drop in P(decision) when the top evidence record is removed | 0.259 | 0.157 |
+| Median latency per greedy explanation (includes first-shape tuning) | 9.4 s (was 16.5 s) | 30.6 s (was 75.4 s) |
+
+The 2B "was" figure comes from the earlier run on the learned-sink checkpoint (`runs/explain`), not the released one; quality is within noise of it at
+n = 24.
+
+Where the time goes, `scripts/time_explain.py` (`runs/deploy/explain_time_{2b,9b}.json`): 8 cases, each run twice.
+Median seconds; "warm" is the second run, after GemLite has tuned its kernels for those input shapes.
+
+| | Evidence (occlusion pass) | Decoding | Faithfulness check | Total |
+|---|---|---|---|---|
+| 2B, warm | 4.67 | 2.43 (about 74 tokens) | 0.67 | 7.87 |
+| 2B, cold | 6.89 | 2.58 | 6.78 | 27.13 |
+| 9B, warm | 15.84 | 5.51 (about 48 tokens) | 0.97 | 24.56 |
+| 9B, cold | 23.31 | 7.06 | 1.15 | 40.36 |
+
+- Decoding is about 33 ms per token on the 2B and 115 ms on the 9B, prompt pass included (the int8 path was about
+  150 ms per token on the 2B).
+- The evidence pass is now the largest cost: one decision per removed record (10 to 25 records here), each re-reading
+  the whole state. The copies share every token before the removed record, so a shared-prefix pass would remove most
+  of that work. Planned.
+- Cold requests pay GemLite autotuning once per new input shape (10 to 90 s). Saving the tuning cache to disk, or
+  padding inputs to a few fixed lengths, removes it in serving. Planned.
+- Bug found while measuring: CUDA-graph capture advanced the static attention layers' write counter, so replays wrote
+  keys three positions late and long sampled outputs overran the cache. Fixed before these runs (the counter is now
+  restored with the recurrent states; unit test in `tests/test_explain.py`).
