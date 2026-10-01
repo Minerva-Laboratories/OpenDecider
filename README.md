@@ -416,5 +416,5 @@ Jev is a product of TypeSafe. This project is not affiliated with TypeSafe.
 Code and released checkpoint weights: [Apache-2.0](LICENSE). See [`NOTICE`](NOTICE).
 The backbones (Qwen3.5 and the listed quantizations) are Apache-2.0 and are downloaded from their own repositories.
 The heads were trained on datasets listed with their licenses in [`data/MANIFEST.md`](data/MANIFEST.md) and in each
-model card. Four of them are CC-BY-SA; whether trained weights count as adapted material under share-alike terms is
+model card. Five of them are CC-BY-SA; whether trained weights count as adapted material under share-alike terms is
 legally unsettled (the heads are classifiers and do not generate text). These checkpoints will be retrained without the CC-BY-SA datasets and re-released with clean provenance.

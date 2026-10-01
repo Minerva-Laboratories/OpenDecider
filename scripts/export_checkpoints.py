@@ -32,15 +32,19 @@ The head was trained on programmatic synthetic data (this repository, no LLM tea
 | stanfordnlp/snli | CC-BY-SA-4.0 |
 | allenai/ai2_arc | CC-BY-SA-4.0 |
 | fancyzhx/dbpedia_14 | CC-BY-SA-3.0 |
+| derek-thomas/ScienceQA (text-only items) | CC-BY-SA-4.0 |
+| allenai/qasc, allenai/cosmos_qa, allenai/quartz | CC-BY-4.0 |
+| ChilleD/StrategyQA | MIT |
 | allenai/winogrande | Apache-2.0 |
 | jackhhao/jailbreak-classification, neuralchemy/Prompt-injection-dataset | Apache-2.0 |
 | reshabhs/SPML_Chatbot_Prompt_Injection, GuardrailsAI/detect-jailbreak, Lakera/gandalf_ignore_instructions | MIT |
 
-Non-commercial datasets were excluded. The evaluation benchmarks were never used for training.
+Also used: in-context batches built from the clinc, massive, dbpedia and injection pools above, and programmatic
+uncertainty items built from our synthetic data. Non-commercial datasets were excluded. The evaluation benchmarks were never used for training.
 
 ## License
 
-The weights in this checkpoint are released under Apache-2.0, like the code. Four training sets are CC-BY-SA
+The weights in this checkpoint are released under Apache-2.0, like the code. Five training sets are CC-BY-SA
 (share-alike). Whether trained weights are "adapted material" under CC-BY-SA is legally unsettled; this head is a
 classifier that does not generate text and cannot reproduce its training sentences. If that matters for your use,
 consult your own counsel. The backbone keeps its own license (Apache-2.0 for every variant listed above).
