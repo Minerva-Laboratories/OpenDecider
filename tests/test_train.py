@@ -164,3 +164,40 @@ def test_state_backward_once_matches_retained_graph():
         assert (a is None) == (b is None)
         if a is not None:
             torch.testing.assert_close(a, b, rtol=1e-4, atol=1e-5)
+
+
+def test_none_augmentation_targets():
+    """Explicit `none` in training: appended last; unknowable (uniform) -> none; gold removed -> none; else gold kept."""
+    import opendecider.train as T
+    rec = {"family": "t", "state": "s", "questions": [
+        {"type": "choice", "prompt": "p", "options": ["a", "b", "c", "d"], "label": 2},
+        {"type": "choice", "prompt": "u", "options": ["a", "b", "c"], "label": 0, "soft": [1 / 3] * 3}]}
+    T._WRAP_P.update(p=0.0, max_opts=0, none_p=1.0, none_drop_p=1.0, eval_none=False)
+    try:
+        q, u = T.to_questions(rec, 0, random.Random(0), 6)
+        assert q.options[-1] == T.NONE_TEXT and q.label == len(q.options) - 1 and "c" not in q.options
+        assert u.options[-1] == T.NONE_TEXT and u.label == 3 and getattr(u, "soft", None) is None
+        T._WRAP_P.update(none_drop_p=0.0)
+        q, _ = T.to_questions(rec, 0, random.Random(0), 6)
+        assert q.options[q.label] == "c" and q.none_col == 4
+        T._WRAP_P.update(none_p=0.0, eval_none=True)                  # evaluation mirrors inference
+        q, _ = T.to_questions(rec, 0, None, 6)
+        assert q.options == ["a", "b", "c", "d", T.NONE_TEXT] and q.label == 2
+    finally:
+        T._WRAP_P.update(none_p=0.0, none_drop_p=0.0, eval_none=False)
+
+
+def test_warm_start_copies_matching_tensors(bb, tmp_path):
+    from opendecider.checkpoint import save
+    from opendecider.train import warm_start
+    src = make(bb, "v2")
+    path = str(tmp_path / "m.pt")
+    save(src, path, {})
+    dst = make(bb, "v2")
+    with torch.no_grad():
+        for p in dst.trainable_parameters():
+            p.add_(1.0)
+    info = warm_start(dst, path)
+    assert info["loaded"] > 0 and not info["new"] and not info["skipped"]
+    for (k, a), b in zip(src.trainable_state_dict().items(), dst.trainable_state_dict().values()):
+        assert torch.equal(a, b), k

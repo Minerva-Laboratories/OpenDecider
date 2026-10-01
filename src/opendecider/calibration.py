@@ -84,8 +84,12 @@ def fit_profile(decider, req: CalibrateRequest | dict, profiles_dir: str = "runs
         p1 = C.calibrate_probs(cal, p1.astype(np.float64), p0.astype(np.float64), np.ones(p1.shape, bool))
     yn = y.numpy()
     nll = lambda p: float(-np.log(np.clip(p[np.arange(len(yn)), yn], 1e-12, 1)).mean())
+    from .conformal import pack
     prof = {"temperature": T, "bias": dict(zip(names, b.detach().tolist())), "method": method, "requested": req.method,
             "calibrator": cal, "cv": cv,
+            # conformal scores on the caller's labels, after this profile's calibration (in-sample for the calibration
+            # fit itself: with flexible calibrators and few labels, coverage can come out slightly below 1 - alpha)
+            "conformal": pack(p1, yn, [spec.type] * len(yn)),
             "type": spec.type, "names": names, "n": len(yn), "created": time.strftime("%Y-%m-%d %H:%M:%S"),
             "fit_in_sample": {"nll_before": nll(p0), "nll_after": nll(p1), "ece_before": _ece(p0, yn), "ece_after": _ece(p1, yn),
                               "acc_before": float((p0.argmax(1) == yn).mean()), "acc_after": float((p1.argmax(1) == yn).mean())}}

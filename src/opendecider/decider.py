@@ -31,7 +31,7 @@ def _normalize(p: torch.Tensor) -> list[float]:
 
 class Decider:
     def __init__(self, model: DecisionModel, temperature: float = 1.0, temperature_by_type: dict | None = None,
-                 profiles_dir: str = "runs/profiles"):
+                 profiles_dir: str = "runs/profiles", conformal: dict | None = None):
         self.model = model.eval()
         if os.environ.get("OPENDECIDER_CUDA_GRAPHS") == "1" and torch.cuda.is_available() and \
                 getattr(model, "state_free", False):
@@ -39,6 +39,7 @@ class Decider:
             self.engine = GraphEngine(model).install()
         self.temperature = temperature
         self.temperature_by_type = temperature_by_type or {}
+        self.conformal = conformal or {}          # {method: {question type: sorted calibration scores}}
         self.profiles_dir = profiles_dir
         self._profiles: dict = {}
         # explicit `none` option: appended as TEXT to every question, so the backbone reads it in context like any
@@ -179,7 +180,16 @@ class Decider:
         q2.none_col = len(q.options)
         return q2
 
-    def _answer_batch(self, qs: list[Question], mem, sampler) -> tuple[dict, int]:
+    def _conformal_scores(self, q: Question, method: str):
+        prof = self.profile(getattr(q, "calibration", None))
+        src = prof.get("conformal") if prof else self.conformal
+        s = (src or {}).get(method, {}).get(q.type)
+        if not s:
+            where = f"profile {q.calibration!r}" if prof else "this checkpoint"
+            raise ValueError(f"no conformal calibration scores for {q.type} questions in {where}")
+        return s
+
+    def _answer_batch(self, qs: list[Question], mem, sampler, conformal=None) -> tuple[dict, int]:
         """Answer isolated questions in one batch (<=255 options) plus the two-stage path (>255)."""
         small = [q for q in qs if len(q.options) <= MAX_OPTIONS]
         large = [q for q in qs if len(q.options) > MAX_OPTIONS]
@@ -212,6 +222,11 @@ class Decider:
                     a["none"] = p_none                               # P(no listed option is supported)
                     if p_none > float(mean[i, :K].max()):
                         a["value"] = "none"
+                if conformal is not None:
+                    from .conformal import prediction_set, threshold
+                    thr = threshold(self._conformal_scores(q, conformal.method), conformal.alpha)
+                    a["set"] = [names[j] for j in prediction_set(probs, thr, conformal.method)]
+                    a["abstain"] = len(a["set"]) != 1 or a["value"] == "none"
                 if hasattr(q, "orig_index"):
                     a["stage1_kept"] = len(q.options)
                 if q.type == "noul":
@@ -289,7 +304,7 @@ class Decider:
                     batch += [self._atomic(f"{name}.{pn}", ps, answers) for pn, ps in spec.parts.items()]
                 else:
                     batch.append(self._atomic(name, spec, answers))
-            got, nt = self._answer_batch(batch, mem, sampler)
+            got, nt = self._answer_batch(batch, mem, sampler, req.conformal)
             n_tok += nt
             for name in wave:
                 spec = req.questions[name]

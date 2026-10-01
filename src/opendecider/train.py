@@ -47,7 +47,11 @@ DEFAULT_TRAIN = dict(
     data_weights=None,              # optional per-file sampling weights aligned with `data` (else uniform over records)
     consistency_weight=0.0,         # batch-invariance KL for comparative multi-item states
     max_train_options=0,            # >0: training-only candidate sampling (keep the answer + random distractors)
-    grad_accum=1)                   # optimizer step every `grad_accum` batches of `states_per_step` (grads averaged)
+    grad_accum=1,                   # optimizer step every `grad_accum` batches of `states_per_step` (grads averaged)
+    init_from=None,                 # warm start: load every trunk/head tensor whose name and shape match
+    none_p=0.0,                     # prob. a question gets the explicit "none of the above" option (as at inference)
+    none_drop_p=0.0,                # given `none`, prob. the gold option is removed and `none` becomes the target
+    conformal=True)                 # store split-conformal scores of the calib split in the checkpoint
 
 # Training-only wrappers. The probe battery's long-wording templates ("the answer is X", "the customer's request is
 # about X") are deliberately NOT in this pool, so probe results measure invariance rather than memorised templates.
@@ -67,6 +71,7 @@ def load_jsonl(path, limit=None):
 
 
 _WRAP_P: dict = {}      # set from the train config in main(); read by to_questions (training rng only)
+NONE_TEXT = "none of the above"     # same default text as Decider.none_text
 
 
 def to_questions(rec, state_idx, rng: random.Random | None, max_q: int):
@@ -100,10 +105,29 @@ def to_questions(rec, state_idx, rng: random.Random | None, max_q: int):
             perm = list(range(len(opts)))
             rng.shuffle(perm)
             opts, lab = [opts[i] for i in perm], perm.index(lab)
-        qq = Question(q["prompt"], opts, q["type"], lab, state_idx, family=rec.get("family", ""))
+        soft = None
         if soft0 is not None:                                # soft target (e.g. uniform for unknowable items)
-            soft = list(soft0)
-            qq.soft = [soft[i] for i in perm] if perm is not None else soft
+            soft = [soft0[i] for i in perm] if perm is not None else list(soft0)
+        has_none = False
+        if (rng.random() < _WRAP_P.get("none_p", 0.0) if rng is not None else _WRAP_P.get("eval_none", False)) \
+                and len(opts) < MAX_OPTIONS and not rec.get("examples"):
+            # explicit `none` option, appended last as at inference. Programmatic targets, no teacher:
+            #   unknowable item (uniform soft target) -> none; gold removed -> none; otherwise the gold stays
+            uniform = soft is not None and max(soft) - min(soft) < 1e-9
+            if uniform:
+                soft, lab = None, len(opts)
+            elif rng is not None and q["type"] == "choice" and soft is None and len(opts) >= 3 \
+                    and rng.random() < _WRAP_P.get("none_drop_p", 0.0):
+                opts, lab = [o for i, o in enumerate(opts) if i != lab], len(opts) - 1
+            elif soft is not None:
+                soft = soft + [0.0]
+            opts = opts + [NONE_TEXT]
+            has_none = True
+        qq = Question(q["prompt"], opts, q["type"], lab, state_idx, family=rec.get("family", ""))
+        if has_none:
+            qq.none_col = len(opts) - 1
+        if soft is not None:
+            qq.soft = soft
         qs.append(qq)
     return qs
 
@@ -262,10 +286,15 @@ def step_loss(model, recs, rng, tcfg, noise_std=0.0, backward=True):
         if tcfg["relevance_weight"] and hard.any():
             loss = loss + tcfg["relevance_weight"] * w * (hard.sum() / len(group)) * relevance_loss(
                 out.relevance[hard], out.opt_mask[hard], labels[hard])
-        score = torch.tensor([q.type == "score" for q in group], device=labels.device) & hard
+        # ordinal loss over the real levels only: the `none` column is not a level, and `none` targets are skipped
+        ncol = torch.tensor([getattr(q, "none_col", -1) for q in group], device=labels.device)
+        score = torch.tensor([q.type == "score" for q in group], device=labels.device) & hard & (labels != ncol)
         if tcfg["ordinal_weight"] and score.any():
+            om = out.opt_mask[score].clone()
+            nc = ncol[score]
+            om[(nc >= 0).nonzero().squeeze(1), nc[nc >= 0]] = False
             loss = loss + tcfg["ordinal_weight"] * (int(score.sum()) / n_score) * ordinal_emd_loss(
-                out.logits[score], out.opt_mask[score], labels[score])
+                out.logits[score], om, labels[score])
         if _MEMDEBUG:
             print(f"  [mem] group {gi}/{len(groups)} q={len(group)} fwd alloc {torch.cuda.memory_allocated() / 2**30:.2f} "
                   f"peak {torch.cuda.max_memory_allocated() / 2**30:.2f} GB", flush=True)
@@ -333,10 +362,10 @@ def consistency_step(model, recs, rng, tcfg, max_pairs: int = 2) -> float:
 
 
 @torch.no_grad()
-def evaluate(model, recs, tcfg, return_logits=False, return_types=False):
+def evaluate(model, recs, tcfg, return_logits=False, return_types=False, return_none=False):
     model.eval()
     ce = br = acc = n = 0.0
-    all_logits, all_labels, all_types = [], [], []
+    all_logits, all_labels, all_types, all_none = [], [], [], []
     for i in range(0, len(recs), tcfg["states_per_step"]):
         chunk = recs[i:i + tcfg["states_per_step"]]
         bb = model.backbone
@@ -356,11 +385,29 @@ def evaluate(model, recs, tcfg, return_logits=False, return_types=False):
                     all_logits.append(out.logits[j, out.opt_mask[j]].float().cpu())
                 all_labels.extend(labels.tolist())
                 all_types.extend(q.type for q in group)
+                all_none.extend(hasattr(q, "none_col") for q in group)
     model.train()
     res = {"val_ce": ce / n, "val_brier": br / n, "val_acc": acc / n, "val_n": int(n)}
     if return_logits:
+        if return_none:
+            return res, all_logits, all_labels, all_types, all_none
         return (res, all_logits, all_labels, all_types) if return_types else (res, all_logits, all_labels)
     return res
+
+
+def warm_start(model, path: str) -> dict:
+    """Copy every non-backbone tensor of a checkpoint whose name and shape match; new modules keep their init
+    (e.g. VeRA vectors start with zero update). Returns what was loaded and what was not."""
+    src = torch.load(path, map_location="cpu", weights_only=False)["state_dict"]
+    own = model.state_dict()
+    load = {k: v for k, v in src.items() if not k.startswith("backbone.") and k in own and own[k].shape == v.shape}
+    model.load_state_dict(load, strict=False)
+    info = {"path": path, "loaded": len(load),
+            "skipped": sorted(k for k in src if not k.startswith("backbone.") and k not in load),
+            "new": sorted(k for k in own if not k.startswith("backbone.") and k not in load)}
+    print(f"[train] warm start from {path}: {info['loaded']} tensors loaded, {len(info['skipped'])} skipped, "
+          f"{len(info['new'])} new", flush=True)
+    return info
 
 
 def fit_temperature(logits, labels) -> float:
@@ -433,8 +480,9 @@ def main(argv=None):
         if t["backbone_checkpointing"]:
             checkpoint_backbone_layers(bb)
         model = build_model(bb, ModelConfig(**cfg["model"])).to(bb.device)
+        init = warm_start(model, t["init_from"]) if t.get("init_from") else None
         n_train = sum(p.numel() for p in model.trainable_parameters())
-        meta = {"config": cfg, "git": git_rev(), "trainable_params": n_train, "torch": torch.__version__,
+        meta = {"config": cfg, "git": git_rev(), "trainable_params": n_train, "torch": torch.__version__, "init": init,
                 "argv": sys.argv, "started": time.strftime("%Y-%m-%d %H:%M:%S")}
         json.dump(meta, open(os.path.join(out, "config.json"), "w"), indent=2)
         print(f"[train] {name}: {n_train/1e6:.2f}M trainable params", flush=True)
@@ -444,6 +492,8 @@ def main(argv=None):
         many = lambda x: [r for f in ([x] if isinstance(x, str) else x) for r in load_jsonl(f)]
         _WRAP_P["p"] = float(t.get("option_wrap_p") or 0.0)
         _WRAP_P["max_opts"] = int(t.get("max_train_options") or 0)
+        _WRAP_P["none_p"], _WRAP_P["none_drop_p"] = float(t.get("none_p") or 0.0), float(t.get("none_drop_p") or 0.0)
+        _WRAP_P["eval_none"] = _WRAP_P["none_p"] > 0          # val/calib questions carry `none` as at inference
         files = [t["data"]] if isinstance(t["data"], str) else list(t["data"])
         pools = [keep(load_jsonl(f)) for f in files]
         train = [r for pool in pools for r in pool]
@@ -496,7 +546,7 @@ def main(argv=None):
         calibs = [t["calib"]] if isinstance(t["calib"], str) else (t["calib"] or [])
         calib = [r for f in calibs if os.path.exists(f) for r in keep(load_jsonl(f))[: max(1, t["eval_states"] // max(1, len(calibs)))]]
         if calib:
-            _, lg, lb, ty = evaluate(model, calib, t, return_logits=True, return_types=True)
+            _, lg, lb, ty, hn = evaluate(model, calib, t, return_logits=True, return_types=True, return_none=True)
             extra["temperature"] = fit_temperature(lg, lb)
             by = {}
             for typ in sorted(set(ty)):
@@ -505,6 +555,19 @@ def main(argv=None):
                     by[typ] = fit_temperature([lg[i] for i in idx], [lb[i] for i in idx])
             extra["temperature_by_type"] = by
             print(f"[calib] temperature {extra['temperature']:.3f} by type {by}", flush=True)
+            if t.get("conformal", True):
+                # probabilities exactly as the decider reports them: per-type temperature, renormalised over the
+                # real options (the `none` column set aside)
+                from .conformal import pack
+                P = []
+                for z, typ, none in zip(lg, ty, hn):
+                    p = torch.softmax(z.float() / by.get(typ, extra["temperature"]), -1)
+                    p = p[:-1] / p[:-1].sum() if none else p
+                    P.append(p.numpy())
+                extra["conformal"] = pack(P, lb, ty)
+                print("[calib] conformal scores: " + ", ".join(f"{k}={len(v)}" for k, v in extra["conformal"]["lac"].items()), flush=True)
+        if init:
+            extra["init_from"] = init["path"]
         save(model, os.path.join(out, "model.pt"), extra)
         print(f"[train] done -> {out}/model.pt", flush=True)
 

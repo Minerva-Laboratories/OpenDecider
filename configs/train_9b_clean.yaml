@@ -1,0 +1,88 @@
+# Clean-provenance 9B: warm start from the CLEAN 2B head stitched onto the 9B GGUF backbone (scripts/train_clean.sh
+# step 2), then trained on the same clean corpus with VeRA adapters on all 32 9B layers, on the deployed int8 features.
+# Never warm-start from runs/x9b-gguf-stitch: that head was trained on share-alike data.
+backbone: configs/backbone_9b_gguf.yaml
+model:
+  variant: v3
+  d_model: 512
+  n_heads: 8
+  decision_layers: 4
+  slot_emb: none
+  dropout: 0.1
+  v3_features: branched
+  v3_cross: question
+  v3_row_format: answer
+  v3_lm_feature: true
+  v3_vera_layers: 32
+  v3_vera_scope: all
+  v3_vera_rank: 256
+  v3_layer_combine: stitch
+  v3_row_checkpoint: true
+  v3_stitch_dim: 2048
+train:
+  data:
+  - data/synthetic/train.jsonl
+  - data/clean_train/kept_public_train.jsonl
+  - data/clean_train/topics_train.jsonl
+  - data/clean_train/reading_train.jsonl
+  - data/clean_train/knowledge_train.jsonl
+  - data/clean_train/kept_knowledge_train.jsonl
+  - data/clean_train/kept_injection_train.jsonl
+  - data/clean_train/injection_train.jsonl
+  - data/clean_train/harmful_train.jsonl
+  - data/clean_train/ordinal_train.jsonl
+  - data/clean_train/kept_context_train.jsonl
+  - data/synthetic/uncertainty_train.jsonl
+  data_weights:
+  - 0.15
+  - 0.15
+  - 0.08
+  - 0.1
+  - 0.06
+  - 0.06
+  - 0.08
+  - 0.07
+  - 0.02
+  - 0.05
+  - 0.12
+  - 0.06
+  val:
+  - data/synthetic/val.jsonl
+  - data/clean_train/kept_public_val.jsonl
+  - data/clean_train/topics_val.jsonl
+  - data/clean_train/reading_val.jsonl
+  - data/clean_train/knowledge_val.jsonl
+  - data/clean_train/kept_injection_val.jsonl
+  - data/clean_train/injection_val.jsonl
+  - data/clean_train/ordinal_val.jsonl
+  calib:
+  - data/synthetic/calib.jsonl
+  - data/clean_train/kept_public_calib.jsonl
+  - data/clean_train/topics_calib.jsonl
+  - data/clean_train/reading_calib.jsonl
+  - data/clean_train/knowledge_calib.jsonl
+  - data/clean_train/kept_knowledge_calib.jsonl
+  - data/clean_train/kept_injection_calib.jsonl
+  - data/clean_train/injection_calib.jsonl
+  - data/clean_train/harmful_calib.jsonl
+  - data/clean_train/ordinal_calib.jsonl
+  seed: 0
+  max_steps: 1500
+  lr: 0.0001
+  warmup: 100
+  states_per_step: 1
+  max_questions_per_state: 6
+  max_state_tokens: 768
+  option_wrap_p: 0.3
+  consistency_weight: 0.5
+  max_train_options: 32
+  tokens_per_microbatch: 1500
+  backbone_weight_quant: null
+  none_p: 0.3
+  none_drop_p: 0.25
+  eval_every: 500
+  eval_states: 800
+  save_every: 500
+  init_from: runs/x2b-clean-stitch9b/model.pt
+  grad_accum: 2
+  max_gpu_gb: 48

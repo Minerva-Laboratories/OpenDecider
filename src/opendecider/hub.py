@@ -168,4 +168,4 @@ def load_decider(path_or_repo: str, backbone: str | None = None, device: str | N
     from .decider import Decider
     model, extra = load_model(path_or_repo, backbone, device, kv_quant, revision)
     return Decider(model, temperature=extra.get("temperature", 1.0),
-                   temperature_by_type=extra.get("temperature_by_type"))
+                   temperature_by_type=extra.get("temperature_by_type"), conformal=extra.get("conformal"))

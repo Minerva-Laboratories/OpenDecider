@@ -28,12 +28,13 @@ TRAIN_FILES = ["data/public_train/train.jsonl", "data/synthetic/train.jsonl", "d
                "data/public_train/knowledge_train.jsonl"]
 
 
-def sample_records(n: int, seed: int = 0, max_opts: int = 32):
+def sample_records(n: int, seed: int = 0, max_opts: int = 32, files=None):
     """A fixed mixed sample of training states (no test data): n/len(files) per file; <= 4 questions per state and
     only questions with <= max_opts options (bounded rows per call)."""
     rng = random.Random(seed)
-    recs, per = [], max(1, n // len(TRAIN_FILES))
-    for f in TRAIN_FILES:
+    files = files or TRAIN_FILES
+    recs, per = [], max(1, n // len(files))
+    for f in files:
         rows = [json.loads(l) for l in open(f)]
         rng.shuffle(rows)
         got = 0
@@ -79,7 +80,7 @@ def cmd_targets(a):
     from eval.evaluate import load_scorer
     model, _ = load_scorer(a.ckpt, None)
     model.eval()
-    recs = sample_records(a.n_states, a.seed)
+    recs = sample_records(a.n_states, a.seed, files=a.files)
     Y, t0 = [], time.time()
     for k, (qs, mem) in enumerate(calls(model, recs)):
         s, _, q, _, o, _ = model._conditioned_feats(qs, mem)          # after the layer combine, before in_norm
@@ -156,6 +157,8 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
     t = sub.add_parser("targets"); t.add_argument("--ckpt", required=True); t.add_argument("--out", required=True)
     t.add_argument("--n-states", type=int, default=300); t.add_argument("--seed", type=int, default=0)
+    t.add_argument("--files", nargs="*", default=None, help="training files to sample states from (default: the "
+                   "original corpus; pass the clean_train files for a clean-provenance stitch)")
     f = sub.add_parser("fit"); f.add_argument("--ckpt", required=True); f.add_argument("--targets", required=True)
     f.add_argument("--backbone-path", required=True); f.add_argument("--layers", default="8,16,24,final")
     f.add_argument("--out", required=True)

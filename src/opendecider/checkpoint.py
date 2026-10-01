@@ -41,4 +41,4 @@ def load_decider(path: str):
     from .decider import Decider
     model, extra = load_model(path)
     return Decider(model, temperature=extra.get("temperature", 1.0),
-                   temperature_by_type=extra.get("temperature_by_type"))
+                   temperature_by_type=extra.get("temperature_by_type"), conformal=extra.get("conformal"))

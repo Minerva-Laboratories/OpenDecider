@@ -101,6 +101,15 @@ class SamplerSpec(BaseModel):
     mode: Literal["mc_dropout", "gaussian_noise"] = "mc_dropout"
 
 
+class ConformalSpec(BaseModel):
+    """Split-conformal prediction sets: each answer gets `set` (options that cannot be ruled out at level alpha) and
+    `abstain` (true unless the set is exactly one real option). Needs stored calibration scores (checkpoint or the
+    question's calibration profile)."""
+    model_config = ConfigDict(extra="forbid")
+    alpha: float = Field(0.1, gt=0, lt=1)
+    method: Literal["lac", "aps"] = "lac"
+
+
 class ContextExample(BaseModel):
     """An in-context example: another state, with answers to (some of) the same questions. Answers present =
     labelled in-context learning; answers absent/None = unlabelled context (e.g. other items for comparison)."""
@@ -115,6 +124,7 @@ class DecideRequest(BaseModel):
     questions: dict[str, QuestionSpec] = Field(min_length=1, max_length=MAX_QUESTIONS)
     sampler: SamplerSpec = SamplerSpec()
     examples: list[ContextExample] = Field(default_factory=list, max_length=64)
+    conformal: ConformalSpec | None = None
 
     @model_validator(mode="after")
     def _state(self):
