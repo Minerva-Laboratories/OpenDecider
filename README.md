@@ -313,7 +313,10 @@ Environment variables:
 
 ### Known limitations
 
-- Accuracy trails Jev and Decider 1 on typed-decisions (zero-shot 0.616 vs 0.727 and 0.768).
+- On sets with real labels, the stitched 9B trails Jev on knowledge-heavy multiple choice (OpenBookQA 0.850 vs 0.942,
+  CommonsenseQA 0.785 vs 0.881) and on injection detection (0.750 vs 0.870), and trails its own backbone's zero-shot
+  letter scores on four of five sets. typed-decisions (0.643 vs 0.727 and 0.768) measures agreement with a teacher
+  model, not correctness (see [typed-decisions](#typed-decisions)).
 - The stitched 9B is slightly below the 2B on prompt-injection detection (0.750 vs 0.767).
 - 4-bit weights cost 4 to 8 points on the public sets with every method tried, AWQ included, because the head was
   trained on int8 features. Retraining the head on 4-bit features is the planned fix.
