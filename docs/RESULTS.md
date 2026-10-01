@@ -1,8 +1,8 @@
 # OpenDecider: detailed results
 
-> Note (2026-09-30): the 2B→9B stitched rows below were computed with the input embeddings standing in for the 9B's
-> untied LM head in the option log-prob feature. They are kept for the record and will be replaced by the
-> re-evaluation on the 9B GGUF weights (`scripts/eval_9b.sh`).
+> Note (2026-09-30): the 2B→9B stitched rows in §2–4 were computed with the input embeddings standing in for the 9B's
+> untied LM head in the option log-prob feature. They are kept for the record. Corrected results on the 9B GGUF
+> weights are in §11 and in the README.
 
 ## Conventions
 
@@ -470,3 +470,41 @@ option rows including `none`). CUPTI kernel timing is not permitted on this Jets
   the Orin delivers. The prefix cache (repeat or growing states) and retrieval (fewer tokens) are the levers here.
 - int8 weight-only matmuls dequantize every call. bf16 weights (`weight_quant: none`, 3.6 GB) run the 838-token case
   in 0.55 s instead of 0.86 s, and 15k tokens in 4.65 s instead of 4.92 s.
+
+## 11. Stitched 9B on the GGUF weights, with the untied LM head (corrected)
+
+`scripts/eval_9b.sh`. The 9B loads from the Q4_0 GGUF that llama-server uses (`src/opendecider/gguf_load.py`;
+validated against llama-server: same top token on three prompts, top-1 log-prob within 0.004). Weights are re-quantized
+to int8. The stitch was refit on these weights (held-out cosine 0.919, previously 0.895). Checkpoint:
+`runs/x9b-gguf-stitch/model.pt`.
+
+typed-decisions (zero-shot, 2,000 decisions, CIs over cases):
+
+| Model | Accuracy | KL | Brier | Log loss | ECE |
+|---|---|---|---|---|---|
+| 2B→9B stitched (GGUF, correct head) | 0.643 [0.620, 0.670] | 0.240 [0.227, 0.253] | 0.135 [0.126, 0.143] | 1.007 | 0.090 |
+| previous stitched run (wrong head) | 0.616 [0.593, 0.639] | 0.279 | 0.153 | 1.046 | 0.146 |
+
+Decision profiles over the 2B, the stitched 9B and the 9B letter scores (2-fold, decision-level CIs): linear 0.641
+[0.622, 0.663], GBDT 0.686 [0.666, 0.707] (Brier 0.106), forest 0.666 [0.648, 0.687].
+
+Public benchmarks (1,000 resamples):
+
+| Split | Stitched 9B | ECE | + 9B letter scores (2-fold profile) | ECE |
+|---|---|---|---|---|
+| Banking77 8-way | 0.869 [0.813, 0.919] | 0.094 | 0.950 [0.912, 0.981] | 0.020 |
+| Prompt-injection detection | 0.750 [0.672, 0.828] | 0.150 | 0.897 [0.836, 0.948] | 0.106 |
+| OpenBookQA | 0.850 [0.818, 0.878] | 0.077 | 0.900 [0.874, 0.924] | 0.030 |
+| CommonsenseQA | 0.785 [0.758, 0.809] | 0.040 | 0.810 [0.786, 0.834] | 0.025 |
+| PubMedQA | 0.898 [0.879, 0.918] | 0.026 | 0.899 [0.880, 0.918] | 0.027 |
+
+`none` option (explicit "none of the above", same protocol as the 2B): P(none) 0.021 on answerable questions, 0.301
+with the correct option removed (AUROC 0.945), 0.095 on unrelated states (AUROC 0.925); accuracy on answerable
+questions 0.916.
+
+Memory and latency, eager (not graphs), int8 weights, one fresh process:
+
+| Cache | Weights (GB) | Peak GB at 838 / 3,744 / 14,752 tokens | Latency s | Stored state (MB) | typed acc (500) | Banking77 | Injection detection |
+|---|---|---|---|---|---|---|---|
+| int8 | 8.557 | 9.814 / 9.946 / 10.985 | 2.642 / 5.423 / 15.228 | 281.0 | 0.602 | 0.869 | 0.750 |
+| int4 | 8.557 | 9.809 / 9.919 / 10.985 | 2.714 / 5.565 / 15.546 | 178.7 | 0.588 | 0.869 | 0.750 |

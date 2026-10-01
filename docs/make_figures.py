@@ -20,9 +20,9 @@ rows = [  # name, accuracy, KL, colour, ours?
     ("MiniLM-L6, fitted per workflow", 0.587, 0.262, GREY, False),
     ("Prior (ignores input)", 0.470, 0.347, GREY, False),
     ("OpenDecider 2B, zero-shot", 0.577, 0.324, BLUE, True),
-    ("OpenDecider 2B→9B stitched, zero-shot", 0.616, 0.279, BLUE, True),
+    ("OpenDecider 2B→9B stitched, zero-shot", 0.643, 0.240, BLUE, True),
     ("OpenDecider + 9B, linear profile", 0.600, 0.271, AQUA, True),
-    ("OpenDecider tree profile (fitted, 2-fold)", 0.675, None, ORANGE, True),
+    ("OpenDecider tree profile (fitted, 2-fold)", 0.686, None, ORANGE, True),
 ]
 fig, ax = plt.subplots(figsize=(7.4, 3.6))
 y = list(range(len(rows)))[::-1]
@@ -43,7 +43,7 @@ fig.savefig("docs/img/typed_decisions.png"); plt.close(fig)
 # ---- public benchmarks
 B = [("banking77_8way", "Banking77\n8 intents"), ("prompt_injections", "Prompt-injection\ndetection"), ("openbookqa", "OpenBookQA"),
      ("commonsenseqa", "Commonsense\nQA"), ("pubmedqa", "PubMedQA")]
-S = [("preds-x2b", "OpenDecider 2B", BLUE), ("public-x9b-stitch", "2B→9B stitched (no training)", AQUA),
+S = [("preds-x2b", "OpenDecider 2B", BLUE), ("public-x9b-gguf", "2B→9B stitched (no training)", AQUA),
      ("zs-9b", "Qwen3.5-9B zero-shot", YELLOW)]
 JEV = {"banking77_8way": 0.838, "prompt_injections": 0.870, "openbookqa": 0.942, "commonsenseqa": 0.881}
 ENS = json.load(open("runs/ens-x2b-9b/ensemble_cv.json"))

@@ -74,8 +74,8 @@ Full tables: [`docs/RESULTS.md`](docs/RESULTS.md).
 | meraGPT Decider 1 (proprietary) | leaderboard | 0.768 | 0.096 | 0.052 |
 | TypeSafe Jev 1.13 (proprietary) | leaderboard | 0.727 | 1.442 | 0.148 |
 | Featherless Simple Jev (35B MoE) | leaderboard | 0.716 | 0.488 | 0.176 |
-| OpenDecider tree profile | fitted, 2-fold | **0.675** [0.66, 0.69] | – | **0.113** |
-| OpenDecider 2B→9B stitched | zero-shot | **0.616** [0.59, 0.64] | **0.279** | 0.153 |
+| OpenDecider tree profile | fitted, 2-fold | **0.686** [0.67, 0.71] | – | **0.106** |
+| OpenDecider 2B→9B stitched | zero-shot | **0.643** [0.62, 0.67] | **0.240** | 0.135 |
 | OpenDecider 2B | zero-shot | 0.577 | 0.324 | 0.168 |
 | Qwen3.5-9B letter scores | zero-shot | 0.573 | 0.899 | 0.344 |
 
@@ -100,9 +100,10 @@ labeled data, and is not a zero-shot result.
 | | Banking77 (8-way) | Prompt-injection detection | OpenBookQA | CommonsenseQA | PubMedQA |
 |---|---|---|---|---|---|
 | OpenDecider 2B | 0.819 | 0.767 | 0.686 | 0.639 | 0.849 |
-| 2B→9B stitched | 0.856 | 0.595 | 0.838 | 0.764 | 0.837 |
+| 2B→9B stitched | 0.869 | 0.750 | 0.850 | 0.785 | **0.898** |
 | Qwen3.5-9B zero-shot | 0.931 | 0.819 | 0.894 | 0.813 | 0.883 |
-| OpenDecider 2B + 9B profile | **0.956** | **0.931** | 0.890 | 0.800 | **0.887** |
+| OpenDecider 2B + 9B profile | **0.956** | **0.931** | 0.890 | 0.800 | 0.887 |
+| OpenDecider stitched 9B + 9B profile | 0.950 | 0.897 | **0.900** | 0.810 | **0.899** |
 | Jev (third-party report) | 0.838 | 0.870 | 0.942 | 0.881 | – |
 
 All values are accuracy. Prompt-injection detection is a classification task
@@ -111,18 +112,18 @@ model labels each text as an injection attempt or a normal request. 0.931 means 
 label; the errors include both missed injections and false alarms. It does not measure whether the model itself
 resists injected instructions inside a state. That is a separate test and not done yet.
 
-### `none` option (2B backbone, no extra training)
+### `none` option (no extra training)
 
 Held-out questions from the training families (clinc, massive, dbpedia, arc, snli), plus questions paired with an
 unrelated state. AUROC measures how well P(none) separates unanswerable from answerable questions.
 
-| Case | Mean P(none) | AUROC vs answerable |
-|---|---|---|
-| Answerable (correct option listed) | 0.097 | – |
-| Correct option removed | 0.430 | 0.845 |
-| State unrelated to the question | 0.151 | 0.795 |
+| Case | 2B: mean P(none) | 2B: AUROC | 9B stitched: mean P(none) | 9B stitched: AUROC |
+|---|---|---|---|---|
+| Answerable (correct option listed) | 0.097 | – | 0.021 | – |
+| Correct option removed | 0.430 | 0.845 | 0.301 | 0.945 |
+| State unrelated to the question | 0.151 | 0.795 | 0.095 | 0.925 |
 
-Accuracy on answerable questions is unchanged (0.892). A learned `none` vector with only its two parameters trained
+Accuracy on answerable questions: 0.892 (2B), 0.916 (9B). A learned `none` vector with only its two parameters trained
 did worse (unrelated-state AUROC 0.537). See [`docs/roadmap_designs.md`](docs/roadmap_designs.md).
 
 ### Memory and quantization (Jetson AGX Orin, 2B backbone, no retraining)
@@ -204,10 +205,10 @@ Design notes: [`docs/roadmap_designs.md`](docs/roadmap_designs.md),
 | | Minimum | Tested |
 |---|---|---|
 | GPU memory, 2B backbone | 2.4 GB for states up to about 1k tokens, 2.5 GB up to 4k, 3.1 GB up to 15k (int8 weights: 1.9 GB). With 4-bit weights and cache: 1.8 / 1.8 / 2.5 GB | Jetson AGX Orin 64 GB (inference), DGX Spark (training) |
-| GPU memory, 9B backbone | about 10 GB of int8 weights plus the same per-state cost (estimate, not measured) | Jetson AGX Orin 64 GB |
+| GPU memory, 9B backbone | 9.8 GB for states up to about 1k tokens, 9.9 GB up to 4k, 11.0 GB up to 15k (int8 weights: 8.6 GB) | Jetson AGX Orin 64 GB |
 | Host RAM | 12 GB peak while loading the 2B backbone | same |
 | Disk, 2B backbone | 4.3 GB weights + about 0.1 GB checkpoint | same |
-| Disk, 9B backbone (stitched) | about 18 GB bf16 weights + 0.23 GB checkpoint | same |
+| Disk, 9B backbone (stitched) | 5.2 GB Q4_0 GGUF (loaded directly, see `src/opendecider/gguf_load.py`) + 0.23 GB checkpoint | same |
 | Disk, Python environment | about 6 GB (PyTorch, transformers) | same |
 | Python | 3.12 | 3.12 on aarch64 (JetPack) |
 | CPU only | Unit tests only (tiny random model) | – |
@@ -277,7 +278,7 @@ Environment variables:
 ### Known limitations
 
 - Accuracy trails Jev and Decider 1 on typed-decisions (zero-shot 0.616 vs 0.727 and 0.768).
-- The stitched 9B loses accuracy on prompt-injection detection (0.595 vs 0.767 for the 2B).
+- The stitched 9B is slightly below the 2B on prompt-injection detection (0.750 vs 0.767).
 - 4-bit weights (NF4) cost 4 to 8 points on the public sets because the head was trained on int8 features.
 - Tree profiles overfit below about 250 labels. Use `method: "auto"` and let cross-validation choose.
 - Latency is 0.8 to 1.6 s per request on the Orin for states up to about 4k tokens, and 4.4 to 4.9 s at 15k. The target
@@ -286,9 +287,6 @@ Environment variables:
 - The prefix cache matches the uncached path to within 0.007 to 0.026 in probability (int8 cache boundaries), not
   bit-exactly.
 - Dense retrieval uses mean-pooled backbone states, which is a weak retriever. BM25 is the default.
-- The published 2B→9B stitched numbers are superseded. The 9B has an untied LM head, and those runs computed the
-  option log-prob feature with the input embeddings instead. The loader now keeps the real head, and a re-evaluation
-  on the 9B GGUF weights is running (`scripts/eval_9b.sh`).
 - There is no Jev API access. All Jev numbers come from TypeSafe or third parties.
 - Checkpoints are not published yet.
 
@@ -298,7 +296,7 @@ Everything below is either running or planned. Results will be added here and in
 
 | Area | Status |
 |---|---|
-| 9B backbone: re-evaluation, memory, latency, `none` option, explanations | Running on the GGUF weights (`scripts/eval_9b.sh`). |
+| 9B with CUDA graphs and quantized-kernel weights; 9B AWQ | Graphs running. AWQ needs ~8.5 GB of disk; planned on another machine. |
 | 9B training (warm start from the stitched head) | Planned, on a separate training machine. |
 | GPUs other than the Jetson AGX Orin (desktop and data-center cards, DGX Spark inference) | Planned. All memory and latency numbers are from one Orin 64 GB. |
 | GPU tests in CI | Planned. Unit tests run on CPU with a tiny random model; one GPU test covers the fused attention path. |
