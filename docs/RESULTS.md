@@ -474,7 +474,7 @@ option rows including `none`). CUPTI kernel timing is not permitted on this Jets
 ## 11. Stitched 9B on the GGUF weights, with the untied LM head (corrected)
 
 `scripts/eval_9b.sh`. The 9B loads from the Q4_0 GGUF that llama-server uses (`src/opendecider/gguf_load.py`;
-validated against llama-server: same top token on three prompts, top-1 log-prob within 0.004). Weights are re-quantized
+validated against llama-server: same top token on three prompts, top-1 log-prob within 0.02). Weights are re-quantized
 to int8. The stitch was refit on these weights (held-out cosine 0.919, previously 0.895). Checkpoint:
 `runs/x9b-gguf-stitch/model.pt`.
 
