@@ -55,11 +55,12 @@ def mask_options(text: str, names) -> str:
     return text
 
 
-def _linear_states(cache, clone: bool = False) -> list:
-    """Every GDN conv/recurrent state tensor in a cache (dict-valued or tensor-valued layer attributes)."""
+def _mutable_state(cache, clone: bool = False) -> list:
+    """Every tensor a decode step changes in place: GDN conv/recurrent states and the static attention layers'
+    write counters (StaticLayer writes keys at its own `cumulative_length`, not at `cache_position`)."""
     out = []
     for layer in cache.layers:
-        for a in ("conv_states", "recurrent_states"):
+        for a in ("conv_states", "recurrent_states", "cumulative_length"):
             v = getattr(layer, a, None)
             ts = [t for t in v.values() if torch.is_tensor(t)] if isinstance(v, dict) else ([v] if torch.is_tensor(v) else [])
             out += [t.clone() if clone else t for t in ts]
@@ -169,8 +170,8 @@ class Explainer:
                 h = bb.lm(input_ids=tok_buf, past_key_values=cache, use_cache=True, cache_position=pos_buf)
                 return head(h.last_hidden_state[:, -1])
             if graph:
-                # warm-up and capture advance the recurrent states: snapshot and restore them
-                saved = _linear_states(cache, clone=True)
+                # warm-up and capture advance the recurrent states and write counters: snapshot and restore them
+                saved = _mutable_state(cache, clone=True)
                 s = torch.cuda.Stream(); s.wait_stream(torch.cuda.current_stream())
                 with torch.cuda.stream(s):
                     for _ in range(2):
@@ -179,7 +180,7 @@ class Explainer:
                 cg = torch.cuda.CUDAGraph()
                 with torch.cuda.graph(cg):
                     out_logits = step()
-                for live, snap in zip(_linear_states(cache), saved):
+                for live, snap in zip(_mutable_state(cache), saved):
                     live.copy_(snap)
             out = torch.empty(n, 0, dtype=torch.long, device=dev)
             done = torch.zeros(n, dtype=torch.bool, device=dev)

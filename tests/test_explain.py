@@ -1,9 +1,10 @@
+import torch
 from fastapi.testclient import TestClient
 
 from conftest import make
 from opendecider.api import create_app
 from opendecider.decider import Decider
-from opendecider.explain import _records, mask_options
+from opendecider.explain import _mutable_state, _records, mask_options
 from opendecider.formatting import state_text
 from tiny import tiny_backbone
 
@@ -33,3 +34,22 @@ def test_explain_endpoint_tiny(tmp_path, monkeypatch):
     out = r.json()
     assert out["decision"] in ("billing", "tech") and 0 <= out["faithfulness"] <= 1 and isinstance(out["evidence"], list)
     assert c.post("/v1/decide", json={"state": "x", "questions": {"a": {"type": "noul", "prompt": "ok?"}}}).status_code == 200
+
+
+def test_decode_state_snapshot_restores_cache():
+    """Graph capture runs extra decode steps; restoring the snapshot must undo all of them (GDN states and the
+    static attention write counters), so the next step equals the first one."""
+    from transformers.cache_utils import StaticCache
+    bb = tiny_backbone(kv_quant="none")
+    cache = StaticCache(config=bb.lm.config, max_cache_len=16)
+    with torch.no_grad():
+        bb.lm(input_ids=torch.tensor([[11, 12, 13, 14, 15]]), past_key_values=cache, use_cache=True,
+              cache_position=torch.arange(5))
+        step = lambda: bb.lm(input_ids=torch.tensor([[16]]), past_key_values=cache, use_cache=True,
+                             cache_position=torch.tensor([5])).last_hidden_state
+        saved = _mutable_state(cache, clone=True)
+        a = step()
+        step()
+        for live, snap in zip(_mutable_state(cache), saved):
+            live.copy_(snap)
+        assert torch.equal(step(), a)
