@@ -532,6 +532,9 @@ the checkpoint's own codes and scales), `nf4` (bitsandbytes). `graphs` = CUDA-gr
 | 9B int8 / int8 / graphs | 8.557 | 11.407 / 12.716 / 15.107 | 3.266 / 5.836 / 24.456 | 0.600 | 0.260 | 0.869 | 0.750 |
 | 9B w8 / int8 / graphs | 8.560 | 11.371 / 12.664 / 15.038 | 2.995 / 7.700 / 34.887 | 0.576 | 0.265 | 0.863 | 0.767 |
 | 9B w8 / int4 / graphs | 8.560 | 11.355 / 12.599 / 14.779 | 3.076 / 7.765 / 35.047 | 0.588 | 0.257 | 0.869 | 0.767 |
+| 2B int8 / int8 / question cache | 1.877 | 2.332 / 2.400 / 3.091 | 1.796 / 2.452 / 5.618 | 0.444 | 0.352 | 0.825 | 0.776 |
+| 2B w8 / int8 / question cache | 1.879 | 2.333 / 2.402 / 3.092 | 2.167 / 3.254 / 7.855 | 0.426 | 0.360 | 0.819 | 0.784 |
+| 9B int8 / int8 / question cache | 8.557 | 9.5 / 9.67 / 10.99 | 5.54 / 8.41 / 18.41 | 0.596 | 0.260 | 0.869 | 0.733 |
 
 Findings:
 - CUDA graphs do not help. The backbone passes are compute-bound on the Orin, not launch-bound (838 tokens through
@@ -545,6 +548,10 @@ Findings:
   trunk and head were trained on int8 features; AWQ lowers the weight error but not enough for an untouched head.
   Retraining the head on 4-bit features is the fix.
 - The int4 cache keeps accuracy within noise in every configuration.
+- The question-cache row path (`v3_question_cache`) gives the same decisions but is slower (2B: 1.80 vs 0.80 s at
+  838 tokens). The compute it saves is small (the repeated question tokens, about 250 tokens over 14 rows, against an
+  838-token state pass), and the current implementation adds one backbone pass per distinct question length and
+  copies and re-quantizes the state cache once per question. It stays off.
 
 Follow-ups (scheduled in `scripts/bench_next.sh`): GEMM microbenchmark with GemLite autotuning and A8W8 (int8
 activations on int8 tensor cores) at the real layer shapes (`scripts/bench_gemm.py`), and the question-cache row

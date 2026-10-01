@@ -233,13 +233,16 @@ python3.12 -m venv .venv && .venv/bin/pip install -e ".[gguf,quant]"
 bash examples/request.sh
 ```
 
-Expected output of the quickstart (2B, int8 backbone):
+Output of the quickstart from a fresh clone (2B, int8 backbone, Jetson AGX Orin):
 
 ```text
-route     -> refund     (billing: ..., technical: ..., refund: ..., other: ...)  none: ...
-urgent    -> ...
-severity  -> ...
+route     -> billing    (billing: 0.70, technical: 0.00, refund: 0.30, other: 0.00)  none: 0.00
+urgent    -> yes        (yes: 0.80, no: 0.20)  none: 0.04
+severity  -> high       (low: 0.03, medium: 0.29, high: 0.58, critical: 0.10)  none: 0.01
 ```
+
+The first call includes one-time warm-up (about 4.5 s on the Orin); later calls on a state this size take about
+0.8 s.
 
 Backbones are cached under `models/` (or `$OPENDECIDER_MODELS`). Every download checks that at least 4 GB of disk
 stays free. Without a CUDA GPU the `int8` variant runs on CPU with reference kernels (slow).

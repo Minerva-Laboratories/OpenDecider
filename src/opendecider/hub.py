@@ -2,7 +2,7 @@
 
 A checkpoint directory (or Hugging Face repo) holds only what we trained (trunk, heads, adapters, stitch map):
     config.json                     model config, temperatures, backbone variants, provenance
-    model-0000k-of-0000n.safetensors  fp16 shards (< 50 MB each, so they fit in a git repo without LFS)
+    model-0000k-of-0000n.safetensors  fp16 shards, VeRA vectors fp32 (< 50 MB each: fits a git repo without LFS)
     README.md                       model card
 The frozen backbone is downloaded from its own repo at a pinned revision the first time it is needed. Variants
 (the same head on differently quantized backbones) are listed in config.json:
@@ -32,8 +32,10 @@ def export(ckpt: str, out_dir: str, backbones: dict, default: str, card: str = "
     """runs/<x>/model.pt -> out_dir/{config.json, model-*.safetensors, README.md}."""
     from safetensors.torch import save_file
     ck = torch.load(ckpt, map_location="cpu", weights_only=False)
-    sd = {k: v.detach().to(torch.float16).contiguous() for k, v in ck["state_dict"].items()
-          if not k.startswith("backbone.")}
+    # fp16 storage, except the VeRA scaling vectors: they multiply fixed random projections, so fp16 rounding there
+    # moves output probabilities by up to 0.017 (fp32 costs < 1 MB)
+    sd = {k: v.detach().to(torch.float32 if k.startswith("vera.") else torch.float16).contiguous()
+          for k, v in ck["state_dict"].items() if not k.startswith("backbone.")}
     os.makedirs(out_dir, exist_ok=True)
     for f in os.listdir(out_dir):                                   # replace old shards
         if f.endswith(".safetensors"):
@@ -41,9 +43,9 @@ def export(ckpt: str, out_dir: str, backbones: dict, default: str, card: str = "
     limit = int(shard_mb * (1 << 20))
     shards, cur, size = [], {}, 0
     for k in sorted(sd, key=lambda k: -sd[k].numel()):
-        n = sd[k].numel() * 2
+        n = sd[k].numel() * sd[k].element_size()
         if n > limit and sd[k].dim() > 1:                           # split one big matrix by rows
-            rows = max(1, limit // (sd[k][0].numel() * 2))
+            rows = max(1, limit // (sd[k][0].numel() * sd[k].element_size()))
             for i, a in enumerate(range(0, sd[k].shape[0], rows)):
                 shards.append({f"{k}::part{i}": sd[k][a:a + rows].contiguous()})
             continue
