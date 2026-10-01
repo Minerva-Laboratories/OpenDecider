@@ -18,3 +18,6 @@ data/typed_decisions/
 # local assistant instructions (the spec is docs/SPEC.md)
 CLAUDE.md
 *.egg-info/
+
+# released checkpoints are tracked (fp16 shards under 50 MB)
+!checkpoints/**/*.safetensors
