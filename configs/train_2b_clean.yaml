@@ -32,6 +32,7 @@ train:
   - data/clean_train/ordinal_train.jsonl
   - data/clean_train/kept_context_train.jsonl
   - data/synthetic/uncertainty_train.jsonl
+  - data/clean_train/injgen_train.jsonl
   data_weights:
   - 0.15
   - 0.15
@@ -40,11 +41,12 @@ train:
   - 0.06
   - 0.06
   - 0.02
-  - 0.13
+  - 0.08
   - 0.02
   - 0.05
-  - 0.12
+  - 0.1
   - 0.06
+  - 0.07
   val:
   - data/synthetic/val.jsonl
   - data/clean_train/kept_public_val.jsonl
@@ -54,6 +56,7 @@ train:
   - data/clean_train/kept_injection_val.jsonl
   - data/clean_train/injection_val.jsonl
   - data/clean_train/ordinal_val.jsonl
+  - data/clean_train/injgen_val.jsonl
   calib:
   - data/synthetic/calib.jsonl
   - data/clean_train/kept_public_calib.jsonl
@@ -65,6 +68,7 @@ train:
   - data/clean_train/injection_calib.jsonl
   - data/clean_train/harmful_calib.jsonl
   - data/clean_train/ordinal_calib.jsonl
+  - data/clean_train/injgen_calib.jsonl
   seed: 0
   max_steps: 1250
   lr: 0.0003
