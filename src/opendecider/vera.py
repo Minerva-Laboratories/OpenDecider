@@ -58,11 +58,20 @@ class VeRA(nn.Module):
             if not self.active:
                 return out
             x = args[0]
-            A = getattr(self, f"A_{i}x{o}").to(x.dtype)
-            B = getattr(self, f"B_{i}x{o}").to(x.dtype)
-            delta = ((x @ A.t()) * self.d[k].to(x.dtype)) @ B.t() * self.b[k].to(x.dtype)
+            A, B = self._frozen(i, o, x.dtype)
+            delta = ((x @ A) * self.d[k].to(x.dtype)) @ B * self.b[k].to(x.dtype)
             return out + delta
         return fn
+
+    def _frozen(self, i, o, dtype):
+        """A^T, B^T of one shape in the compute dtype, cast once (the random projections never change)."""
+        key = (i, o, dtype)
+        c = self.__dict__.setdefault("_cast", {})
+        hit = c.get(key)
+        A = getattr(self, f"A_{i}x{o}")
+        if hit is None or hit[0].device != A.device:
+            hit = c[key] = (A.t().to(dtype).contiguous(), getattr(self, f"B_{i}x{o}").t().to(dtype).contiguous())
+        return hit
 
     def remove(self):
         for h in self._handles:

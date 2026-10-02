@@ -13,8 +13,8 @@ model:
   v3_cross: question
   v3_row_format: answer
   v3_lm_feature: true
-  v3_vera_layers: 32
-  v3_vera_scope: all
+  v3_vera_layers: 16
+  v3_vera_scope: rows_top
   v3_vera_rank: 256
   v3_layer_combine: stitch
   v3_row_checkpoint: true
@@ -70,21 +70,22 @@ train:
   max_steps: 1500
   lr: 0.0001
   warmup: 100
-  states_per_step: 1
-  max_questions_per_state: 6
+  states_per_step: 2
+  max_questions_per_state: 4
   max_state_tokens: 768
   option_wrap_p: 0.3
   consistency_weight: 0.5
-  max_train_options: 32
+  max_train_options: 16
   tokens_per_microbatch: 1500
   backbone_weight_quant: null
   none_p: 0.3
   none_drop_p: 0.25
-  eval_every: 500
+  eval_every: 250
   eval_states: 800
-  save_every: 500
+  save_every: 250
   init_from: runs/x2b-clean-stitch9b/model.pt
-  grad_accum: 2
-  max_gpu_gb: 48
+  grad_accum: 1
+  max_gpu_gb: 34
   consistency_pairs: 1
   consistency_options: 8
+  materialize_weights: 5

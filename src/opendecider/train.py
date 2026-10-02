@@ -53,7 +53,9 @@ DEFAULT_TRAIN = dict(
     init_from=None,                 # warm start: load every trunk/head tensor whose name and shape match
     none_p=0.0,                     # prob. a question gets the explicit "none of the above" option (as at inference)
     none_drop_p=0.0,                # given `none`, prob. the gold option is removed and `none` becomes the target
-    conformal=True)                 # store split-conformal scores of the calib split in the checkpoint
+    conformal=True,                 # store split-conformal scores of the calib split in the checkpoint
+    materialize_weights=False,      # true: all; a number: GB budget for the extra bf16 bytes
+    resume=False)                   # continue exactly from runs/<name>/train_state.pt (written at every save)      # int8 backbone: expand the deployed weights to bf16 once (same numbers, faster)
 
 # Training-only wrappers. The probe battery's long-wording templates ("the answer is X", "the customer's request is
 # about X") are deliberately NOT in this pool, so probe results measure invariance rather than memorised templates.
@@ -269,9 +271,11 @@ def step_loss(model, recs, rng, tcfg, noise_std=0.0, backward=True):
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=tcfg.get("autocast_bf16", False)
                             and torch.cuda.is_available()):
             _, out = model.run(group, mem)
+        # every flag below is known on the CPU from the question objects: no GPU syncs inside the loop
         labels = torch.tensor([q.label for q in group]).to(out.logits.device, non_blocking=True)
-        is_soft = torch.tensor([getattr(q, "soft", None) is not None for q in group], device=labels.device)
-        if is_soft.any():
+        soft_flags = [getattr(q, "soft", None) is not None for q in group]
+        is_soft = torch.tensor(soft_flags).to(labels.device, non_blocking=True)
+        if any(soft_flags):
             K = out.logits.shape[1]
             tgt = torch.zeros(len(group), K, device=labels.device)
             for i, q in enumerate(group):
@@ -285,25 +289,28 @@ def step_loss(model, recs, rng, tcfg, noise_std=0.0, backward=True):
         w = len(group) / n                     # every term is a per-question mean -> exact accumulation
         loss = d["loss"] * w
         hard = ~is_soft
-        if tcfg["relevance_weight"] and hard.any():
-            loss = loss + tcfg["relevance_weight"] * w * (hard.sum() / len(group)) * relevance_loss(
+        n_hard = len(group) - sum(soft_flags)
+        if tcfg["relevance_weight"] and n_hard:
+            loss = loss + tcfg["relevance_weight"] * w * (n_hard / len(group)) * relevance_loss(
                 out.relevance[hard], out.opt_mask[hard], labels[hard])
         # ordinal loss over the real levels only: the `none` column is not a level, and `none` targets are skipped
-        ncol = torch.tensor([getattr(q, "none_col", -1) for q in group], device=labels.device)
-        score = torch.tensor([q.type == "score" for q in group], device=labels.device) & hard & (labels != ncol)
-        if tcfg["ordinal_weight"] and score.any():
-            om = out.opt_mask[score].clone()
-            nc = ncol[score]
-            om[(nc >= 0).nonzero().squeeze(1), nc[nc >= 0]] = False
-            loss = loss + tcfg["ordinal_weight"] * (int(score.sum()) / n_score) * ordinal_emd_loss(
-                out.logits[score], om, labels[score])
+        sc = [i for i, q in enumerate(group) if q.type == "score" and not soft_flags[i]
+              and q.label != getattr(q, "none_col", -1)]
+        if tcfg["ordinal_weight"] and sc:
+            idx = torch.tensor(sc).to(labels.device, non_blocking=True)
+            om = out.opt_mask[idx].clone()
+            nc = [(r, group[i].none_col) for r, i in enumerate(sc) if hasattr(group[i], "none_col")]
+            if nc:
+                om[[r for r, _ in nc], [c for _, c in nc]] = False
+            loss = loss + tcfg["ordinal_weight"] * (len(sc) / n_score) * ordinal_emd_loss(
+                out.logits[idx], om, labels[idx])
         if _MEMDEBUG:
             print(f"  [mem] group {gi}/{len(groups)} q={len(group)} fwd alloc {torch.cuda.memory_allocated() / 2**30:.2f} "
                   f"peak {torch.cuda.max_memory_allocated() / 2**30:.2f} GB", flush=True)
         if backward:
             loss.backward(retain_graph=shared_graph and roots is None and gi < len(groups) - 1)
-        tot["loss"] += loss.item(); tot["ce"] += d["ce"].item() * w; tot["brier"] += d["brier"].item() * w
-        tot["acc"] += (out.logits.argmax(-1) == labels).float().sum().item() / n
+        tot["loss"] += loss.detach(); tot["ce"] += d["ce"].detach() * w; tot["brier"] += d["brier"].detach() * w
+        tot["acc"] += (out.logits.argmax(-1) == labels).float().sum() / n
     if roots:
         v0_mem.prefix_batch = None
         if any(l.grad is not None for l in leaves.values()):
@@ -318,6 +325,7 @@ def step_loss(model, recs, rng, tcfg, noise_std=0.0, backward=True):
         if _MEMDEBUG:
             print(f"  [mem] after consistency alloc {torch.cuda.memory_allocated() / 2**30:.2f} "
                   f"peak {torch.cuda.max_memory_allocated() / 2**30:.2f} GB", flush=True)
+    tot = {k: float(v) for k, v in tot.items()}         # one sync per call, for the log
     tot["n_q"] = n
     return tot
 
@@ -366,7 +374,7 @@ def consistency_step(model, recs, rng, tcfg, max_pairs: int = 2) -> float:
     m = out.opt_mask[0::2]
     kl = ((lp_a.exp() * (lp_a - lp_b)) * m).sum(-1).mean()
     (tcfg["consistency_weight"] * kl).backward()
-    return float(kl)
+    return kl.detach()
 
 
 @torch.no_grad()
@@ -484,6 +492,10 @@ def main(argv=None):
         if t["backbone_weight_quant"] is not None:
             bcfg.weight_quant = t["backbone_weight_quant"]
         bb = Backbone.load(bcfg)
+        if t.get("materialize_weights"):
+            from .quant import materialize_int8_
+            print(f"[train] materialized {materialize_int8_(bb.lm, bb.dtype, None if t["materialize_weights"] is True else float(t["materialize_weights"]))} int8 linears to {bb.dtype}", flush=True)
+            torch.cuda.empty_cache()
         bb.cfg.weight_quant = deploy_quant       # checkpoint records the deployment quantisation
         if t["backbone_checkpointing"]:
             checkpoint_backbone_layers(bb)
@@ -519,10 +531,22 @@ def main(argv=None):
         sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: min(1, (s + 1) / t["warmup"]) *
                                                   0.5 * (1 + math.cos(math.pi * min(1, s / t["max_steps"]))))
         rng = random.Random(t["seed"])
+        start = 1
+        state_path = os.path.join(out, "train_state.pt")
+        if t.get("resume") and os.path.exists(state_path):
+            # exact continuation: weights, optimizer moments, LR schedule, data-sampling and torch RNG
+            st = torch.load(state_path, map_location="cpu", weights_only=False)
+            model.load_state_dict(st["model"], strict=False)
+            opt.load_state_dict(st["opt"]); sched.load_state_dict(st["sched"])
+            rng.setstate(st["rng"]); torch.set_rng_state(st["torch_rng"])
+            if torch.cuda.is_available() and st.get("cuda_rng") is not None:
+                torch.cuda.set_rng_state(st["cuda_rng"])
+            start = st["step"] + 1
+            print(f"[train] resumed from {state_path} at step {st['step']}", flush=True)
         log = open(os.path.join(out, "log.jsonl"), "a")
         model.train()
         t0 = time.time()
-        for step in range(1, t["max_steps"] + 1):
+        for step in range(start, t["max_steps"] + 1):
             opt.zero_grad(set_to_none=True)
             k = max(1, int(t.get("grad_accum") or 1))
             infos = []
@@ -539,7 +563,7 @@ def main(argv=None):
             gn = torch.nn.utils.clip_grad_norm_(params, t["grad_clip"])
             opt.step(); sched.step()
             info.update(step=step, gn=float(gn), lr=sched.get_last_lr()[0],
-                        s_per_step=(time.time() - t0) / step)
+                        s_per_step=(time.time() - t0) / (step - start + 1))
             if step % 10 == 0 or step == 1:
                 log.write(json.dumps(info) + "\n"); log.flush()
                 print(f"[train] step {step} loss {info['loss']:.4f} ce {info['ce']:.4f} acc {info['acc']:.3f} "
@@ -550,6 +574,11 @@ def main(argv=None):
                 print(f"[eval] step {step} {ev}", flush=True)
             if step % t["save_every"] == 0 or step == t["max_steps"]:
                 save(model, os.path.join(out, "model.pt"), {"step": step})
+                torch.save({"step": step, "model": model.trainable_state_dict(), "opt": opt.state_dict(),
+                            "sched": sched.state_dict(), "rng": rng.getstate(), "torch_rng": torch.get_rng_state(),
+                            "cuda_rng": torch.cuda.get_rng_state() if torch.cuda.is_available() else None},
+                           state_path + ".tmp")
+                os.replace(state_path + ".tmp", state_path)        # atomic: a kill mid-write keeps the old state
         extra = {"step": t["max_steps"], "temperature": 1.0}
         calibs = [t["calib"]] if isinstance(t["calib"], str) else (t["calib"] or [])
         calib = [r for f in calibs if os.path.exists(f) for r in keep(load_jsonl(f))[: max(1, t["eval_states"] // max(1, len(calibs)))]]

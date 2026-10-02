@@ -133,14 +133,42 @@ class Int8Linear(nn.Module):
 
     @property
     def weight(self) -> torch.Tensor:  # some HF code paths read .weight.dtype/.device
+        if self.__dict__.get("_dq") is not None:
+            return self._dq
         return self.qweight.to(self.scale.dtype) * self.scale
 
+    def materialize(self, dtype: torch.dtype) -> None:
+        """Training: expand the int8 weight ONCE to `dtype` (the exact product the forward computes per call) and
+        drop the int8 copy. Same numbers as the deployed int8 layer, without a dequantize kernel on every forward,
+        recompute and backward call. Inference keeps int8 (fused GemLite kernels or this per-call path)."""
+        self.__dict__["_dq"] = (self.qweight.to(dtype) * self.scale.to(dtype)).detach()
+        self.qweight = torch.empty(0, dtype=torch.int8, device=self.qweight.device)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        dq = self.__dict__.get("_dq")
+        if dq is not None and dq.dtype == x.dtype:
+            return F.linear(x, dq, None if self.bias is None else self.bias.to(x.dtype))
         return F.linear(x, self.qweight.to(x.dtype) * self.scale.to(x.dtype),
                         None if self.bias is None else self.bias.to(x.dtype))
 
     def extra_repr(self) -> str:
         return f"in={self.in_features}, out={self.out_features}, int8 weight-only"
+
+
+def materialize_int8_(module: nn.Module, dtype: torch.dtype = torch.bfloat16, budget_gb: float | None = None) -> int:
+    """Expand Int8Linear layers under `module` once (see Int8Linear.materialize), in module order, until the extra
+    memory (bf16 minus int8 bytes) would exceed `budget_gb` (None: all). Returns the number expanded."""
+    n, extra = 0, 0.0
+    per = torch.finfo(dtype).bits // 8 - 1                      # extra bytes per weight
+    for m in module.modules():
+        if isinstance(m, Int8Linear) and m.__dict__.get("_dq") is None:
+            add = m.qweight.numel() * per / 2**30
+            if budget_gb is not None and extra + add > budget_gb:
+                continue
+            m.materialize(dtype)
+            extra += add
+            n += 1
+    return n
 
 
 class Int8Embedding(nn.Module):

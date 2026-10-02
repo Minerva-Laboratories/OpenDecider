@@ -216,3 +216,48 @@ def test_consistency_step_caps_options(bb, monkeypatch):
     t = dict(T.DEFAULT_TRAIN, max_train_options=8, consistency_weight=0.5)
     T.consistency_step(m, [rec], random.Random(0), t)
     assert seen and max(seen) == 8
+
+
+def test_resume_is_exact(bb, tmp_path, monkeypatch):
+    """Interrupt after the step-2 checkpoint, resume: final weights equal an uninterrupted run (optimizer, schedule,
+    sampling and torch RNG all restored)."""
+    import json
+    import yaml
+    import opendecider.train as T
+    from contextlib import nullcontext
+    data = tmp_path / "d.jsonl"
+    data.write_text("\n".join(json.dumps(dict(REC, id=f"r{i}")) for i in range(6)))
+    cfg = {"backbone": {"path": "x", "device": "cpu", "dtype": "float32"},
+           "model": {"variant": "v2", "d_model": 32, "n_heads": 2, "decision_layers": 1, "slot_emb": "none"},
+           "train": {"data": str(data), "val": [], "calib": [], "max_steps": 4, "save_every": 2, "eval_every": 1000,
+                     "states_per_step": 1, "warmup": 1, "tokens_per_microbatch": 4000, "seed": 3,
+                     "backbone_checkpointing": False, "autocast_bf16": False, "out_dir": str(tmp_path)}}
+    (tmp_path / "c.yaml").write_text(yaml.safe_dump(cfg))
+    monkeypatch.setattr(T.Backbone, "load", staticmethod(lambda c: bb))
+    monkeypatch.setattr(T, "gpu_lock", lambda tag: nullcontext())
+    monkeypatch.setattr(T, "limit_gpu_memory", lambda gb: None)
+    run = lambda name, *extra: T.main(["--config", str(tmp_path / "c.yaml"), "--set", f"train.name={name}", *extra])
+    load = lambda name: torch.load(tmp_path / name / "model.pt", weights_only=False)["state_dict"]
+    run("full")
+    calls = {"n": 0}
+    real = T.step_loss
+    def flaky(*a, **k):
+        calls["n"] += 1
+        if calls["n"] == 3:
+            raise KeyboardInterrupt
+        return real(*a, **k)
+    monkeypatch.setattr(T, "step_loss", flaky)
+    try:
+        run("cut")
+    except KeyboardInterrupt:
+        pass
+    resumed = {"n": 0}
+    def counted(*a, **k):
+        resumed["n"] += 1
+        return real(*a, **k)
+    monkeypatch.setattr(T, "step_loss", counted)
+    run("cut", "train.resume=true")
+    assert resumed["n"] == 2                      # steps 3 and 4 only: not a fresh run from step 1
+    a, b = load("full"), load("cut")
+    for k in a:
+        assert torch.equal(a[k], b[k]), k
