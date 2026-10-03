@@ -55,7 +55,8 @@ DEFAULT_TRAIN = dict(
     none_drop_p=0.0,                # given `none`, prob. the gold option is removed and `none` becomes the target
     conformal=True,                 # store split-conformal scores of the calib split in the checkpoint
     materialize_weights=False,      # true: all; a number: GB budget for the extra bf16 bytes
-    resume=False)                   # continue exactly from runs/<name>/train_state.pt (written at every save)      # int8 backbone: expand the deployed weights to bf16 once (same numbers, faster)
+    resume=False,
+    max_oom_skips=0)                # >0: skip up to this many steps whose batch runs out of GPU memory (logged)                   # continue exactly from runs/<name>/train_state.pt (written at every save)      # int8 backbone: expand the deployed weights to bf16 once (same numbers, faster)
 
 # Training-only wrappers. The probe battery's long-wording templates ("the answer is X", "the customer's request is
 # about X") are deliberately NOT in this pool, so probe results measure invariance rather than memorised templates.
@@ -546,16 +547,33 @@ def main(argv=None):
         log = open(os.path.join(out, "log.jsonl"), "a")
         model.train()
         t0 = time.time()
+        oom_skips = 0
         for step in range(start, t["max_steps"] + 1):
             opt.zero_grad(set_to_none=True)
             k = max(1, int(t.get("grad_accum") or 1))
             infos = []
+            oom = False
             for _ in range(k):
                 if weights:                                # choose a file by weight, then a record uniformly
                     recs = [rng.choice(pools[i]) for i in rng.choices(range(len(pools)), weights=weights, k=t["states_per_step"])]
                 else:
                     recs = rng.sample(train, t["states_per_step"])
-                infos.append(step_loss(model, recs, rng, t, t["noise_std_train"]))
+                try:
+                    infos.append(step_loss(model, recs, rng, t, t["noise_std_train"]))
+                except torch.OutOfMemoryError:
+                    # a rare oversized batch: drop this step's gradients and move on (bounded by max_oom_skips)
+                    oom_skips += 1
+                    oom = True
+                    opt.zero_grad(set_to_none=True)
+                    torch.cuda.empty_cache()
+                    print(f"[train] step {step}: out of memory, step skipped ({oom_skips}/{t['max_oom_skips']})", flush=True)
+                    log.write(json.dumps({"step": step, "oom_skip": oom_skips}) + "\n"); log.flush()
+                    if oom_skips > t["max_oom_skips"]:
+                        raise
+                    break
+            if oom:
+                sched.step()
+                continue
             info = {key: (sum(x[key] for x in infos) / k if isinstance(infos[0][key], float) else infos[-1][key])
                     for key in infos[0]}
             if k > 1:

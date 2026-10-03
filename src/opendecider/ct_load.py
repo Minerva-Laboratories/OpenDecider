@@ -15,7 +15,7 @@ import os
 import torch
 import torch.nn as nn
 
-from .quant import Int8Embedding
+from .quant import Int8Embedding, Int8Linear
 
 
 def unpack_int4(packed: torch.Tensor, K: int) -> torch.Tensor:
@@ -89,7 +89,13 @@ def load_qwen35_ct(path: str, device: str = "cuda", dtype=torch.bfloat16):
     lm.rotary_emb = type(lm.rotary_emb)(config=c, device=device)
     head = None
     if not getattr(cfg, "tie_word_embeddings", True):
-        raise NotImplementedError("untied LM head in a compressed-tensors checkpoint")
+        # untied LM head (e.g. Qwen3.5-9B): stored unquantized as `lm_head.weight`; int8 per row, like the GGUF path
+        name = "lm_head.weight" if "lm_head.weight" in where else pre + "lm_head.weight"
+        w = where[name].get_tensor(name)
+        lin = nn.Linear(w.shape[1], w.shape[0], bias=False, device=device, dtype=dtype)
+        lin.weight.copy_(w.to(device=device, dtype=dtype))
+        head = Int8Linear(lin)
+        del lin, w
     return lm.eval(), head
 
 

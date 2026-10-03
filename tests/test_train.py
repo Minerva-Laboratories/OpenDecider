@@ -261,3 +261,36 @@ def test_resume_is_exact(bb, tmp_path, monkeypatch):
     a, b = load("full"), load("cut")
     for k in a:
         assert torch.equal(a[k], b[k]), k
+
+
+def test_oom_step_is_skipped_within_budget(bb, tmp_path, monkeypatch):
+    import json
+    import pytest
+    import yaml
+    import opendecider.train as T
+    from contextlib import nullcontext
+    data = tmp_path / "d.jsonl"
+    data.write_text("\n".join(json.dumps(dict(REC, id=f"r{i}")) for i in range(4)))
+    cfg = {"backbone": {"path": "x", "device": "cpu", "dtype": "float32"},
+           "model": {"variant": "v2", "d_model": 32, "n_heads": 2, "decision_layers": 1, "slot_emb": "none"},
+           "train": {"data": str(data), "val": [], "calib": [], "max_steps": 3, "save_every": 100, "eval_every": 1000,
+                     "states_per_step": 1, "warmup": 1, "tokens_per_microbatch": 4000, "backbone_checkpointing": False,
+                     "autocast_bf16": False, "out_dir": str(tmp_path)}}
+    (tmp_path / "c.yaml").write_text(yaml.safe_dump(cfg))
+    monkeypatch.setattr(T.Backbone, "load", staticmethod(lambda c: bb))
+    monkeypatch.setattr(T, "gpu_lock", lambda tag: nullcontext())
+    monkeypatch.setattr(T, "limit_gpu_memory", lambda gb: None)
+    monkeypatch.setattr(T.torch.cuda, "empty_cache", lambda: None)
+    real, calls = T.step_loss, {"n": 0}
+    def flaky(*a, **k):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise torch.OutOfMemoryError("simulated")
+        return real(*a, **k)
+    monkeypatch.setattr(T, "step_loss", flaky)
+    T.main(["--config", str(tmp_path / "c.yaml"), "--set", "train.name=ok", "train.max_oom_skips=1"])
+    log = [json.loads(l) for l in open(tmp_path / "ok" / "log.jsonl")]
+    assert any(r.get("oom_skip") == 1 for r in log)
+    calls["n"] = 0
+    with pytest.raises(torch.OutOfMemoryError):
+        T.main(["--config", str(tmp_path / "c.yaml"), "--set", "train.name=strict"])

@@ -78,13 +78,13 @@ train:
   max_steps: 1500
   lr: 0.0001
   warmup: 100
-  states_per_step: 2
+  states_per_step: 1
   max_questions_per_state: 4
   max_state_tokens: 768
   option_wrap_p: 0.3
   consistency_weight: 0.5
   max_train_options: 16
-  tokens_per_microbatch: 1500
+  tokens_per_microbatch: 1000
   backbone_weight_quant: null
   none_p: 0.3
   none_drop_p: 0.25
@@ -92,8 +92,9 @@ train:
   eval_states: 800
   save_every: 250
   init_from: runs/x2b-clean-stitch9b/model.pt
-  grad_accum: 1
+  grad_accum: 2
   max_gpu_gb: 34
   consistency_pairs: 1
   consistency_options: 8
-  materialize_weights: 5
+  materialize_weights: 3
+  max_oom_skips: 30
