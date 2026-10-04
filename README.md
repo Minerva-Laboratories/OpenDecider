@@ -129,21 +129,27 @@ is right. The sets are wider than they would be in-distribution; refit them on y
 
 ### Memory and latency (Jetson AGX Orin)
 
-Measured on the previous release, which used the same architecture and backbones; re-measurement on the new
-checkpoints is in progress. One fresh process per config; accuracy columns are omitted here because they belonged
-to the previous heads.
+One fresh process per configuration, eager kernels. Accuracy on 500 typed-decisions questions (secondary) / Banking77
+8 intents / prompt-injection detection.
 
-| Model, weights / cache | Weight memory | Peak GPU memory, 0.8k / 3.7k / 15k-token state | Latency, same states | Stored state, 15k tokens |
+| Model, weights / cache | Weights on GPU | Peak GPU memory, 0.8k / 3.7k / 15k-token state | Latency, same states | Accuracy |
 |---|---|---|---|---|
-| 2B, int8 / int8 (default) | 1.88 GB | 2.4 / 2.5 / 3.1 GB | 0.86 / 1.58 / 4.92 s | 106 MB |
-| 2B, int8 / int4 | 1.88 GB | 2.4 / 2.5 / 3.1 GB | 0.81 / 1.47 / 4.60 s | 67 MB |
-| 2B, NF4 / int8 | 1.26 GB | 1.8 / 1.8 / 2.5 GB | 0.64 / 1.33 / 4.43 s | 106 MB |
-| 9B, int8 (from Q4_0 GGUF) / int8 | 8.56 GB | 9.8 / 9.9 / 11.0 GB | 2.64 / 5.42 / 15.23 s | 281 MB |
+| 2B, int8 / int8 (default) | 1.88 GB | 2.4 / 2.5 / 3.1 GB | 1.04 / 1.95 / 6.05 s | 0.414 / 0.831 / 0.681 |
+| 2B, int8 / int4 | 1.88 GB | 2.4 / 2.5 / 3.1 GB | 1.05 / 1.95 / 6.08 s | 0.412 / 0.825 / 0.664 |
+| 2B, AWQ int4 / int8 | 1.32 GB | 1.8 / 1.9 / 2.5 GB | 0.93 / 2.23 / 7.72 s | 0.446 / 0.863 / 0.647 |
+| 2B, NF4 / int8 | 1.26 GB | 1.8 / 1.9 / 2.5 GB | 0.83 / 1.73 / 5.84 s | 0.384 / 0.775 / 0.638 |
+| 9B, int8 / int8 (default; Q4_0 GGUF download, int8 on the GPU) | 8.62 GB | 9.9 / 10.0 / 11.1 GB | 3.68 / 7.52 / 21.4 s | 0.560 / 0.875 / 0.810 |
+| 9B, int8 / int4 | 8.62 GB | 9.9 / 10.0 / 11.1 GB | 3.70 / 7.55 / 21.4 s | 0.546 / 0.881 / 0.793 |
+| 9B stitched head on AWQ int4 / int4 (not released) | 5.74 GB | 6.9 / 7.0 / 8.2 GB | 2.93 / 7.20 / 26.4 s | 0.526 / 0.887 / 0.819 |
 
-- Option rows attend to one shared copy of the state's K/V through fused SDPA (memory-efficient kernel, scores never
-  materialized), so memory grows slowly with the number of options.
-- A 4-bit cache keeps accuracy within noise; 4-bit weights cost accuracy because the heads were trained on int8
-  features (`docs/RESULTS.md` §9, §12).
+- The heads were trained on int8 backbone features. On the 2B, 4-bit weights cost a few points on some sets and gain
+  on others; NF4 is the weakest.
+- A 9B in 4 bits works when the head is fitted to it: the stitch refit on the AWQ weights matches the int8 stitched
+  model on the public benchmarks (`docs/RESULTS.md` §13.6). The released 9B, trained on int8 features, has not been
+  retrained on 4-bit ones yet.
+- A 4-bit KV cache halves the stored state (281 → 179 MB on the 9B at 15k tokens) but not the peak: the backbone has
+  only 6 attention layers with 2 KV heads.
+- Option rows share one copy of the state's keys and values through fused SDPA (scores never materialized).
 
 ### typed-decisions (secondary: agreement with a teacher model)
 
@@ -244,17 +250,16 @@ Design notes: [`docs/roadmap_designs.md`](docs/roadmap_designs.md),
 
 | | Minimum | Tested |
 |---|---|---|
-| GPU memory, 2B backbone | 2.4 GB for states up to about 1k tokens, 3.1 GB up to 15k (int8 weights: 1.9 GB) | Jetson AGX Orin 64 GB |
-| GPU memory, 9B backbone | 9.8 GB for states up to about 1k tokens, 11.0 GB up to 15k (int8 weights: 8.6 GB) | Jetson AGX Orin 64 GB |
+| GPU memory, 2B | 2.4 GB for states up to about 1k tokens, 3.1 GB up to 15k (int8 weights); 1.8 / 2.5 GB with 4-bit weights | Jetson AGX Orin 64 GB |
+| GPU memory, 9B | 9.9 GB for states up to about 1k tokens, 11.1 GB up to 15k (int8 weights) | Jetson AGX Orin 64 GB |
 | Host RAM | 12 GB peak while loading the 2B backbone | same |
 | Disk | 2B: 4.3 GB backbone + 0.1 GB checkpoint; 9B: 5.2 GB Q4_0 GGUF + 0.1 GB checkpoint; Python environment about 6 GB | same |
 | Python | 3.12 | 3.12 on aarch64 (JetPack) |
 | CPU only | the 2B `int8` variant runs (slowly); unit tests use a tiny random model | – |
 
-GPU memory figures were measured on the previous release (same backbones). Training needs more: about 20 GB (2B) and
-34 GB (9B) of GPU memory on the Orin with the release configs. The prefix cache adds up to
-`OPENDECIDER_STATE_CACHE_MB` (default 2 GB). The code keeps at least 4 GB of disk free and refuses downloads that would
-go below that.
+Training needs more: about 20 GB (2B) and 34 GB (9B) of GPU memory on the Orin with the release configs. The prefix
+cache adds up to `OPENDECIDER_STATE_CACHE_MB` (default 2 GB). The code keeps at least 4 GB of disk free and refuses
+downloads that would go below that.
 
 ## Quickstart
 
@@ -280,7 +285,7 @@ severity  -> medium     (low: 0.23, medium: 0.29, high: 0.28, critical: 0.20)  n
 ```
 
 The ticket says little about severity, and the calibrated 2B says so with a flat distribution. The first call includes
-one-time warm-up (2.7 s here); later calls on a state this size take about 0.8 s.
+one-time warm-up (2.7 s here); later calls on a state this size take about 1 s.
 
 Backbones are cached under `models/` (or `$OPENDECIDER_MODELS`). Every download checks that at least 4 GB of disk
 stays free. Without a CUDA GPU the `int8` variant of the 2B runs on CPU with reference kernels (slow).
@@ -363,7 +368,9 @@ Environment variables:
 - Conformal sets with the checkpoint's own scores keep coverage on other benchmarks but are wide (2.1 options on
   average at α = 0.1). Refit them on your labels.
 - 4-bit backbone variants (`awq`, `nf4`) were not trained on; their features differ from the int8 ones the head saw.
-- Latency on the Orin is about 1 s per request (2B) for states up to about 1k tokens and grows with state length.
+  The released 9B has no 4-bit variant yet (a stitched 4-bit head works; see Memory and latency).
+- Latency on the Orin is about 1 s per request (2B) and 3.7 s (9B) for states up to about 1k tokens, and grows with
+  state length (6 s and 21 s at 15k tokens).
   The passes are compute-bound: CUDA graphs were measured and made it slower (`docs/RESULTS.md` §12).
 - Explanations take about 8 s (2B) and 25 s (9B) on the Orin and can contain small factual slips.
 - The prefix cache matches the uncached path to within 0.007 to 0.026 in probability (int8 cache boundaries), not

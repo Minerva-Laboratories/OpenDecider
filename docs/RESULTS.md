@@ -724,10 +724,24 @@ Banking77 is held out as a dataset, not as a domain: CLINC and MASSIVE cover the
 measures new wording of familiar intents. The audit cannot see indirect influence: the injection data was generated,
 and the release checkpoints chosen, after looking at these benchmarks (README, "How we measure, and why").
 
-### 13.6 Memory and latency
+### 13.6 Memory, latency and a 4-bit 9B
 
-Re-measurement on the new checkpoints is in progress (`scripts/bench_quant.py`). The previous release, with the same
-architecture and backbones, is in §9 and §12.
+`scripts/bench_quant.py`, one fresh process per configuration (`runs/quant/fresh/`; accuracy from the shared-process
+runs `runs/quant/release_*.json`, which memory carry-over does not affect). Jetson AGX Orin, eager kernels. The full
+table is in the README (Memory and latency).
+
+A 9B in 4 bits: the clean 2B's stitch refit directly on the AWQ int4 weights (cyankiwi/Qwen3.5-9B-AWQ-4bit@156edc4bbe;
+the untied LM head is read from the checkpoint), compared with the stitch on the int8 weights. Zero-shot accuracy:
+
+| Stitch fitted on | Banking77 8-way | Prompt injections | OpenBookQA | CommonsenseQA | PubMedQA | typed-decisions |
+|---|---|---|---|---|---|---|
+| AWQ int4 weights | 0.881 [0.82, 0.93] | 0.793 [0.72, 0.86] | 0.862 [0.83, 0.89] | 0.784 [0.76, 0.81] | 0.879 [0.86, 0.90] | 0.566 [0.540, 0.590] |
+| int8 weights (from the Q4_0 GGUF) | 0.881 [0.83, 0.93] | 0.784 [0.71, 0.85] | 0.844 [0.81, 0.87] | 0.782 [0.76, 0.81] | 0.893 [0.87, 0.91] | 0.565 [0.542, 0.590] |
+
+The 4-bit stitched model is as accurate as the int8 one with 2.9 GB less weight memory (5.74 vs 8.62 GB; peak 6.9 vs
+9.9 GB at 0.8k tokens). It is faster on short states (2.9 vs 3.7 s at 0.8k tokens) and slower on long ones (26.4 vs
+21.4 s at 15k), where GemLite's 4-bit kernels lose to cuBLAS at large batch sizes (§12.2). The released 9B was trained
+on int8 features; training it on the AWQ features is the way to a trained 4-bit 9B.
 
 ## 14. Prompt-injection detection: generated attacks and calibration
 

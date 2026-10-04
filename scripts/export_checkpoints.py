@@ -24,7 +24,8 @@ PUBLIC = [("banking77_8way", "Banking77 8-way"), ("prompt_injections", "Prompt-i
 RELEASES = [
     {"name": "opendecider-2b", "title": "OpenDecider 2B", "run": "runs/x2b-clean3", "default": "int8",
      "variants": {"int8": ("int8", QWEN2B), "w8": ("w8", QWEN2B), "nf4": ("nf4", QWEN2B), "awq": ("awq", AWQ2B)},
-     "bench": ("runs/quant/release_2b.json", {"int8": "int8:int8", "w8": "w8:int8", "nf4": "nf4:int8", "awq": "awq:int8"}),
+     "bench": ("runs/quant/release_2b.json", "runs/quant/fresh/2b_{cfg}.json",
+               {"int8": "int8:int8", "w8": "w8:int8", "nf4": "nf4:int8", "awq": "awq:int8"}),
      "evals": "x2b-clean3",
      "summary": "Trained from scratch for 1,250 steps on the clean corpus, on the deployed int8 backbone features, with "
                 "VeRA adapters on every backbone layer (25.4M trainable parameters).",
@@ -33,7 +34,7 @@ RELEASES = [
                      "also runs on CPU (slow). Disk: 4.3 GB for the backbone download."},
     {"name": "opendecider-9b", "title": "OpenDecider 9B", "run": "runs/x9b-clean3", "default": "gguf-q4_0",
      "variants": {"gguf-q4_0": ("int8", GGUF9B)},
-     "bench": ("runs/quant/release_9b.json", {"gguf-q4_0": "int8:int8"}),
+     "bench": ("runs/quant/release_9b.json", "runs/quant/fresh/9b_{cfg}.json", {"gguf-q4_0": "int8:int8"}),
      "evals": "x9b-clean3",
      "summary": "The 2B checkpoint's trunk and heads moved to the 9B with a closed-form ridge map between the two backbones' "
                 "features, then trained for 1,500 steps on the same corpus with VeRA adapters on the top 16 layers "
@@ -130,22 +131,27 @@ split; for other distributions, refit with a few dozen labels (`POST /v1/calibra
 
 
 def variants_table(rel):
-    path, cfg_of = rel["bench"]
-    if not os.path.exists(path):
+    """Memory and latency from one fresh process per config; accuracy from the shared-process run (memory left by one
+    config inflates the next in a shared process, accuracy is unaffected)."""
+    acc_path, mem_pat, cfg_of = rel["bench"]
+    if not os.path.exists(acc_path):
         return ""
-    b = json.load(open(path))
+    acc = json.load(open(acc_path))
     rows = []
     for name, (wq, src) in rel["variants"].items():
-        r = b.get(cfg_of[name])
-        if r is None:
+        cfg = cfg_of[name]
+        mem_path = mem_pat.format(cfg=cfg.replace(":", "_"))
+        if cfg not in acc or not os.path.exists(mem_path):
             continue
-        rows.append(f"| `{name}`{' (default)' if name == rel['default'] else ''} | {src['repo_id']} | {r['weights_gb']:.2f} GB | "
-                    f"{r['peak_gb_20']:.1f} / {r['peak_gb_400']:.1f} GB | {r['latency_s_20']:.2f} / {r['latency_s_400']:.2f} s | "
-                    f"{r['typed']['acc']:.3f} / {r['banking77_8way']:.3f} / {r['prompt_injections']:.3f} |")
+        m, a = next(iter(json.load(open(mem_path)).values())), acc[cfg]
+        rows.append(f"| `{name}`{' (default)' if name == rel['default'] else ''} | {src['repo_id']} | {m['weights_gb']:.2f} GB | "
+                    f"{m['peak_gb_20']:.1f} / {m['peak_gb_400']:.1f} GB | {m['latency_s_20']:.2f} / {m['latency_s_400']:.2f} s | "
+                    f"{a['typed']['acc']:.3f} / {a['banking77_8way']:.3f} / {a['prompt_injections']:.3f} |")
     return f"""## Backbone variants
 
-Jetson AGX Orin 64 GB, int8 KV cache, eager kernels. Accuracy: 500 typed-decisions questions / Banking77 8-way /
-prompt-injection detection. The head was trained on the default variant's features.
+Jetson AGX Orin 64 GB, int8 KV cache, eager kernels, one fresh process per variant for memory and latency.
+Accuracy: 500 typed-decisions questions (secondary) / Banking77 8-way / prompt-injection detection. The head was
+trained on the default variant's features.
 
 | Variant | Backbone source | Weights on GPU | Peak GPU memory, 0.8k / 15k-token state | Latency, same states | Accuracy |
 |---|---|---|---|---|---|

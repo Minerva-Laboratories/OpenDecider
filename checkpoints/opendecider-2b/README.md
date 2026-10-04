@@ -47,7 +47,18 @@ Conformal prediction sets (`"conformal": {"alpha": 0.1}` in a request) use calib
 checkpoint (choice 406, noul 393, score 84 questions from the training families' calibration split). Coverage holds for requests like that
 split; for other distributions, refit with a few dozen labels (`POST /v1/calibrate`).
 
+## Backbone variants
 
+Jetson AGX Orin 64 GB, int8 KV cache, eager kernels, one fresh process per variant for memory and latency.
+Accuracy: 500 typed-decisions questions (secondary) / Banking77 8-way / prompt-injection detection. The head was
+trained on the default variant's features.
+
+| Variant | Backbone source | Weights on GPU | Peak GPU memory, 0.8k / 15k-token state | Latency, same states | Accuracy |
+|---|---|---|---|---|---|
+| `int8` (default) | Qwen/Qwen3.5-2B | 1.88 GB | 2.4 / 3.1 GB | 1.04 / 6.05 s | 0.414 / 0.831 / 0.681 |
+| `w8` | Qwen/Qwen3.5-2B | 1.88 GB | 2.4 / 3.1 GB | 0.89 / 8.36 s | 0.418 / 0.838 / 0.672 |
+| `nf4` | Qwen/Qwen3.5-2B | 1.26 GB | 1.8 / 2.5 GB | 0.83 / 5.84 s | 0.384 / 0.775 / 0.638 |
+| `awq` | cyankiwi/Qwen3.5-2B-AWQ-4bit | 1.32 GB | 1.8 / 2.5 GB | 0.93 / 7.72 s | 0.446 / 0.863 / 0.647 |
 
 ## Requirements
 
