@@ -1,7 +1,6 @@
 import math
 
 import pytest
-import torch
 
 from opendecider.decider import Decider
 from opendecider.decompose import fit_logistic

@@ -9,7 +9,6 @@ that would leave < 4 GB free.
 from __future__ import annotations
 
 import argparse
-import dataclasses
 import json
 import math
 import os
@@ -23,7 +22,7 @@ import torch
 import yaml
 
 from .backbone import Backbone, BackboneConfig, StateMemory, checkpoint_backbone_layers
-from .batching import Question, state_texts
+from .batching import Question
 from .formatting import answer_row_prefix, record_state_text
 from .cache import TokenCache, segment_layout
 from .checkpoint import save
@@ -510,7 +509,6 @@ def main(argv=None):
 
         fam = set(t["families"]) if t["families"] else None
         keep = (lambda rs: [r for r in rs if r.get("family") in fam]) if fam else (lambda rs: rs)
-        many = lambda x: [r for f in ([x] if isinstance(x, str) else x) for r in load_jsonl(f)]
         _WRAP_P["p"] = float(t.get("option_wrap_p") or 0.0)
         _WRAP_P["max_opts"] = int(t.get("max_train_options") or 0)
         _WRAP_P["none_p"], _WRAP_P["none_drop_p"] = float(t.get("none_p") or 0.0), float(t.get("none_drop_p") or 0.0)

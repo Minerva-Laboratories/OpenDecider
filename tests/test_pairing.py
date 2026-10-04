@@ -36,7 +36,6 @@ def test_questions_see_their_own_state_in_v3_context(bb):
             f, _ = bb(*bb.pad([own]))
         qf, _ = bb(*bb.pad(bb.tokenize([question_text(q.prompt)])))
         exp = torch.cat([f[0], qf[0]]).float()
-        L = exp.shape[0]
         got_raw = torch.cat([feats[q.state_idx, :len(own)], m.text_feats([question_text(q.prompt)])[0]]).float()
         assert torch.allclose(got_raw, exp, atol=0.05 * exp.abs().max()), f"question {n} paired with wrong state"
         # and questions from different records must differ in context

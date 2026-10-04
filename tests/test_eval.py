@@ -7,7 +7,7 @@ import torch
 
 from eval import metrics as M
 from eval.baselines import LabelScorer, _emb_rows
-from eval.probes import (dummy_option_probe, duplicate_option_probe, label_length_probe, latency_probe,
+from eval.probes import (dummy_option_probe, duplicate_option_probe, label_length_probe,
                          model_decide_fn, model_request_fn, permutation_probe, repeat_probe, run_battery)
 from opendecider.batching import Question, state_texts
 from opendecider.decider import Decider

@@ -7,7 +7,7 @@ All variants share one call pattern:
 """
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from typing import Sequence
 
 import torch
@@ -18,8 +18,8 @@ from .backbone import Backbone, PackedCache, StateMemory
 from .batching import Packed, Question, pack
 from .formatting import option_text, question_text
 from .fusion import CrossAttention, GatedXAttnDense, PerceiverResampler
-from .heads import NEG, PointerHead
-from .options import SlotEmbedding, masked_mean, span_mean, span_pool
+from .heads import PointerHead
+from .options import SlotEmbedding, span_pool
 from .quant import Int8Tensor, kv_mode, materialize, maybe_quantize
 
 

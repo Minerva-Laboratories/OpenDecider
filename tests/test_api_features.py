@@ -46,6 +46,17 @@ def test_calibration_profile_fit_apply_and_order_invariance(dec):
     # the profile's biases are keyed by name, so they move with the option under reordering
     b = dec.profile(pid)["bias"]
     assert set(b) == {"billing", "tech", "other"}
+    assert rev["answers"]["t"]["value"] in b
+    # with an order-invariant model (slot_emb none) the calibrated probability of each named option is unchanged
+    from opendecider.decider import Decider
+    from tests.conftest import make
+    inv = Decider(make(dec.model.backbone, "v1", slot_emb="none"), profiles_dir=dec.profiles_dir)
+    pid2 = TestClient(create_app(inv)).post("/v1/calibrate", json={"question": qspec, "examples": exs,
+                                                                     "method": "vector"}).json()["id"]
+    p1 = inv.decide({"state": STATE, "questions": {"t": dict(qspec, calibration=pid2)}})["answers"]["t"]["probs"]
+    p2 = inv.decide({"state": STATE, "questions": {"t": dict(qspec, options=qspec["options"][::-1],
+                                                             calibration=pid2)}})["answers"]["t"]["probs"]
+    assert all(abs(p1[k] - p2[k]) < 1e-4 for k in p1), (p1, p2)
     assert client.post("/v1/decide", json={"state": "s", "questions": {"t": dict(qspec, calibration="nope")}}).status_code == 400
 
 

@@ -23,7 +23,7 @@ import torch
 from . import calibrators as C
 from .batching import state_texts
 from .calibrators import fit_logit_profile
-from .schema import CalibrateRequest, opt_name
+from .schema import CalibrateRequest
 
 
 def _label_index(spec, names, label) -> int:

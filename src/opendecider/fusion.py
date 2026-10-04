@@ -13,7 +13,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .quant import Int8Tensor, materialize
+from .quant import materialize
 
 
 class CrossAttention(nn.Module):

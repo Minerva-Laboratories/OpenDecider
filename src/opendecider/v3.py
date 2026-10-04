@@ -35,10 +35,9 @@ from .batching import Packed, Question
 from .formatting import answer_option_text, answer_row_prefix, option_text, question_answer_text, question_text
 from .heads import NEG
 from .models import DecisionModel, DecisionOutput, Memory, VARIANTS
-from .options import SlotEmbedding
 from .cache import TokenCache, encode_missing, segment_layout
 from .prefix_attn import shared_prefix_attention
-from .quant import Int8Tensor, kv_mode, materialize, maybe_quantize
+from .quant import kv_mode, materialize, maybe_quantize
 
 
 class ScaleNorm(nn.Module):

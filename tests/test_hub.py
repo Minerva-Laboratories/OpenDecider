@@ -5,7 +5,7 @@ import torch
 from conftest import make
 from opendecider import hub
 from opendecider.batching import Question
-from tiny import TOKENIZER, tiny_backbone
+from tiny import tiny_backbone
 
 
 def test_export_then_load_roundtrip(tmp_path, monkeypatch):

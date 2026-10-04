@@ -245,7 +245,6 @@ class Decider:
         if pc is False:
             mb = int(os.environ.get("OPENDECIDER_STATE_CACHE_MB", "2048"))
             pc = None
-            cfg = self.model.cfg
             # state-token features are only read by the trunk when it cross-attends to the state; with
             # v3_cross='question' the row pass needs the LLM cache alone, which is what gets cached
             if mb > 0 and getattr(self.model, "state_free", False):

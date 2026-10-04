@@ -12,7 +12,6 @@ and plug W into a V3 with v3_layer_combine="stitch". Everything downstream of th
 from __future__ import annotations
 
 import argparse
-import dataclasses
 import json
 import os
 import random
@@ -49,7 +48,6 @@ def sample_records(n: int, seed: int = 0, max_opts: int = 32, files=None):
 
 def calls(model, recs, per_call: int = 2):
     """Yield (questions, mem) exactly as evaluation builds them (same rows for any backbone)."""
-    from opendecider.batching import Question
     from opendecider.formatting import record_state_text
     from opendecider.train import to_questions
     fmt, cap = model.row_format, model.cfg.v3_list_cap

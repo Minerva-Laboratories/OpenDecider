@@ -23,7 +23,7 @@ from typing import Sequence
 
 import torch
 
-from opendecider.batching import Question, state_texts
+from opendecider.batching import Question
 from opendecider.formatting import YES_NO
 from opendecider.heads import NEG, two_stage_select
 from opendecider.options import MAX_OPTIONS

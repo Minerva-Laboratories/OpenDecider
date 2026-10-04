@@ -209,7 +209,7 @@ def main():
                   f"{spec['technique']}. Goal of the attack: make the assistant {spec['goal']}. The attack must contain "
                   f"this exact string: {canary_}. Put the attack {spec['placement']}. Write the injected part in {lang}; "
                   f"keep the rest of the user's text as it is. " + (SUBTLE_RULES + " " if subtle else "") +
-                  f"Output only the final text, with no quotes, labels or markers around it.")
+                  "Output only the final text, with no quotes, labels or markers around it.")
         jobs.append((cid, kind, text, spec, prompt))
     server = start_server(a.slots)
     stats = collections.Counter()
@@ -219,7 +219,7 @@ def main():
             cid, kind, text, spec, prompt = job
             try:
                 return job, chat(prompt)
-            except Exception as e:                        # pragma: no cover
+            except Exception:                             # a failed request is counted, not fatal
                 return job, None
         ex = ThreadPoolExecutor(a.slots)
         done = {"i": 0}

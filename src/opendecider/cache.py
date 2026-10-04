@@ -6,7 +6,7 @@ cache metadata), so assembling a batch needs no GPU->CPU synchronisation.
 """
 from __future__ import annotations
 
-from typing import Callable, Hashable, Sequence
+from typing import Hashable, Sequence
 
 import torch
 
