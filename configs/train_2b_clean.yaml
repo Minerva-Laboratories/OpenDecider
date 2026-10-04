@@ -1,6 +1,6 @@
-# Clean-provenance 2B: same architecture as runs/x2b, trained from scratch on data/clean_train (no share-alike,
-# non-commercial or LLM-labelled sources), on the DEPLOYED int8 backbone features (backbone_weight_quant: null), with
-# the explicit "none of the above" option supervised (gold removed / unknowable -> none) and conformal scores stored.
+# OpenDecider 2B (checkpoints/opendecider-2b): clean-provenance corpus, trained from scratch on the deployed int8
+# backbone features, with the explicit "none of the above" option supervised and conformal scores stored.
+#   python -m opendecider.train --config configs/train_2b_clean.yaml --set train.name=x2b-clean3
 backbone: configs/backbone_2b.yaml
 model:
   variant: v3
@@ -13,85 +13,57 @@ model:
   v3_cross: question
   v3_row_format: answer
   v3_lm_feature: true
-  v3_vera_layers: 24
-  v3_vera_scope: all
   v3_vera_rank: 256
-  v3_layer_combine: attn
-  v3_row_checkpoint: true
+  v3_row_checkpoint: true          # recompute option-row chunks in backward
+  v3_vera_layers: 24
+  v3_vera_scope: all               # VeRA on every layer, state pass and option rows
+  v3_layer_combine: attn           # per-token depth attention over the feature layers
 train:
+  # clean corpus (data/MANIFEST.md); weights = sampling probability per file
   data:
-  - data/synthetic/train.jsonl
-  - data/clean_train/kept_public_train.jsonl
-  - data/clean_train/topics_train.jsonl
-  - data/clean_train/reading_train.jsonl
-  - data/clean_train/knowledge_train.jsonl
-  - data/clean_train/kept_knowledge_train.jsonl
-  - data/clean_train/kept_injection_train.jsonl
-  - data/clean_train/injection_train.jsonl
-  - data/clean_train/harmful_train.jsonl
-  - data/clean_train/ordinal_train.jsonl
-  - data/clean_train/kept_context_train.jsonl
-  - data/synthetic/uncertainty_train.jsonl
-  - data/clean_train/injgen_train.jsonl
-  - data/clean_train/injgen2_train.jsonl
-  data_weights:
-  - 0.14
-  - 0.15
-  - 0.08
-  - 0.1
-  - 0.06
-  - 0.06
-  - 0.02
-  - 0.08
-  - 0.02
-  - 0.05
-  - 0.09
-  - 0.06
-  - 0.04
-  - 0.05
-  val:
-  - data/synthetic/val.jsonl
-  - data/clean_train/kept_public_val.jsonl
-  - data/clean_train/topics_val.jsonl
-  - data/clean_train/reading_val.jsonl
-  - data/clean_train/knowledge_val.jsonl
-  - data/clean_train/kept_injection_val.jsonl
-  - data/clean_train/injection_val.jsonl
-  - data/clean_train/ordinal_val.jsonl
-  - data/clean_train/injgen_val.jsonl
-  - data/clean_train/injgen2_val.jsonl
-  calib:
-  - data/synthetic/calib.jsonl
-  - data/clean_train/kept_public_calib.jsonl
-  - data/clean_train/topics_calib.jsonl
-  - data/clean_train/reading_calib.jsonl
-  - data/clean_train/knowledge_calib.jsonl
-  - data/clean_train/kept_knowledge_calib.jsonl
-  - data/clean_train/kept_injection_calib.jsonl
-  - data/clean_train/injection_calib.jsonl
-  - data/clean_train/harmful_calib.jsonl
-  - data/clean_train/ordinal_calib.jsonl
-  - data/clean_train/injgen_calib.jsonl
-  - data/clean_train/injgen2_calib.jsonl
+    - data/synthetic/train.jsonl                    # 0.14  programmatic synthetic tasks
+    - data/clean_train/kept_public_train.jsonl      # 0.15  clinc, massive, winogrande
+    - data/clean_train/topics_train.jsonl           # 0.08  LEDGAR, arXiv
+    - data/clean_train/reading_train.jsonl          # 0.10  CUAD, CSQA2, RuleTaker, HANS
+    - data/clean_train/knowledge_train.jsonl        # 0.06  CODAH, Balanced-COPA, AQuA-RAT, CaseHOLD
+    - data/clean_train/kept_knowledge_train.jsonl   # 0.06  QASC, CosmosQA, QuaRTz, StrategyQA
+    - data/clean_train/kept_injection_train.jsonl   # 0.02  Gandalf
+    - data/clean_train/injection_train.jsonl        # 0.08  TrustAIRLab, LLMail, OASST1 negatives
+    - data/clean_train/harmful_train.jsonl          # 0.02  XSTest, JBB-Behaviors
+    - data/clean_train/ordinal_train.jsonl          # 0.05  Civil Comments, OASST1 ratings
+    - data/clean_train/kept_context_train.jsonl     # 0.09  in-context items (clinc, massive)
+    - data/synthetic/uncertainty_train.jsonl        # 0.06  unknowable / buried states
+    - data/clean_train/injgen_train.jsonl           # 0.04  generated attacks, blunt
+    - data/clean_train/injgen2_train.jsonl          # 0.05  generated attacks, subtle
+  data_weights: [0.14, 0.15, 0.08, 0.10, 0.06, 0.06, 0.02, 0.08, 0.02, 0.05, 0.09, 0.06, 0.04, 0.05]
+  val: [data/synthetic/val.jsonl, data/clean_train/kept_public_val.jsonl, data/clean_train/topics_val.jsonl,
+        data/clean_train/reading_val.jsonl, data/clean_train/knowledge_val.jsonl, data/clean_train/kept_injection_val.jsonl,
+        data/clean_train/injection_val.jsonl, data/clean_train/ordinal_val.jsonl, data/clean_train/injgen_val.jsonl,
+        data/clean_train/injgen2_val.jsonl]
+  calib: [data/synthetic/calib.jsonl, data/clean_train/kept_public_calib.jsonl, data/clean_train/topics_calib.jsonl,
+          data/clean_train/reading_calib.jsonl, data/clean_train/knowledge_calib.jsonl,
+          data/clean_train/kept_knowledge_calib.jsonl, data/clean_train/kept_injection_calib.jsonl,
+          data/clean_train/injection_calib.jsonl, data/clean_train/harmful_calib.jsonl, data/clean_train/ordinal_calib.jsonl,
+          data/clean_train/injgen_calib.jsonl, data/clean_train/injgen2_calib.jsonl]
   seed: 0
   max_steps: 1250
-  lr: 0.0003
+  lr: 3.0e-4
   warmup: 100
-  states_per_step: 4
+  states_per_step: 4               # 4 states per pass: fewer, larger kernels (training is CPU-bound otherwise)
   grad_accum: 1
   max_questions_per_state: 6
   max_state_tokens: 768
-  option_wrap_p: 0.3
-  consistency_weight: 0.5
+  max_train_options: 32            # training-only candidate sampling: gold + random distractors
+  tokens_per_microbatch: 4000
+  option_wrap_p: 0.3               # meaning-preserving option rewordings
+  consistency_weight: 0.5          # batch-invariance KL on in-context items
   consistency_pairs: 1
   consistency_options: 8
-  max_train_options: 32
-  tokens_per_microbatch: 4000
+  none_p: 0.3                      # questions that get "none of the above"
+  none_drop_p: 0.25                # of those, gold removed -> target "none"
+  backbone_weight_quant: null      # train on the deployed backbone (int8), not bf16
+  materialize_weights: true        # expand int8 weights to bf16 once (bit-identical, faster)
   max_gpu_gb: 28
-  backbone_weight_quant: null
-  none_p: 0.3
-  none_drop_p: 0.25
   eval_every: 250
   eval_states: 800
   save_every: 250
-  materialize_weights: true

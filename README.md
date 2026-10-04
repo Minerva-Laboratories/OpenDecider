@@ -18,11 +18,13 @@
 ---
 
 OpenDecider is an open decision model. You send a state (text or JSON) and a set of typed questions. It returns a
-calibrated probability for each option. It never writes free text on the decision path.
+calibrated probability for each option, plus the probability that none of your options fits. It never writes free text
+on the decision path.
 
-It is also a public hypothesis test. It rebuilds the observable behavior of TypeSafe's Jev from published methods and
-open weights, then measures where the result is consistent or inconsistent with public observations. It makes no
-claim about how Jev is built.
+It started as a public hypothesis test: can a model built only from published methods and open weights reproduce the
+observable behavior of TypeSafe's Jev? It reports where the result is consistent or inconsistent with public
+observations, and makes no claim about how Jev is built. The released checkpoints are trained only on data with clean
+provenance (no share-alike, non-commercial or unlicensed sources, and no labels produced by a model).
 
 ```text
 state + { route: choice[billing, technical, refund, other], urgent: noul, severity: score[low..critical] }
@@ -33,9 +35,11 @@ state + { route: choice[billing, technical, refund, other], urgent: noul, severi
 
 - [Features](#features)
 - [Results](#results)
+- [How we measure, and why](#how-we-measure-and-why)
 - [How it works](#how-it-works)
 - [Requirements](#requirements)
 - [Quickstart](#quickstart)
+- [Checkpoints](#checkpoints)
 - [API](#api)
 - [Limitations](#limitations)
 - [Roadmap](#roadmap)
@@ -49,9 +53,9 @@ state + { route: choice[billing, technical, refund, other], urgent: noul, severi
 |---|---|
 | Typed questions | `choice` (up to 255 options, more with a two-stage shortlist), `noul` (yes/no), `score` (ordinal levels with an expected value). |
 | Order invariance | Option order does not change the output. One pass, no permutation averaging. Unit-tested. |
-| Portable heads | A head trained on the 2B backbone moves to the 9B backbone with a closed-form ridge map. No gradient steps. |
-| Calibration | Trained with cross-entropy plus Brier. `POST /v1/calibrate` fits a per-question profile from your labels and picks the calibrator by cross-validation. |
-| `none` option | Every question gets a "none of the above" option that the backbone reads like any other. Its probability tells you when no listed option is supported. |
+| `none` option | Every question gets a "none of the above" option. It is trained (correct option removed or question unanswerable → `none`), and its probability is reported next to your options. |
+| Calibration | Trained with cross-entropy plus Brier, temperatures fitted per question type. `POST /v1/calibrate` fits a profile from your labels and picks the calibrator by cross-validation. |
+| Conformal sets | `"conformal": {"alpha": 0.1}` returns the options that cannot be ruled out at that level, and whether to abstain. |
 | Prefix cache | States are cached across requests at record boundaries. A state that grows (events, logs) only pays for the new records. |
 | Retrieval store | SQLite store with BM25 plus dense search. It builds a state from a large record collection under a token budget. |
 | Explanations | Optional `POST /v1/explain`. The same backbone writes a short explanation, cites the records that drove the decision, and scores its own faithfulness. |
@@ -59,123 +63,153 @@ state + { route: choice[billing, technical, refund, other], urgent: noul, severi
 
 ## Results
 
-All numbers are held-out. Fitted numbers (profiles, trees) are out-of-fold. Brackets are 95% bootstrap intervals.
-Full tables: [`docs/RESULTS.md`](docs/RESULTS.md).
+Zero-shot: no data from these benchmarks was used for training, tuning or data generation (see
+[How we measure, and why](#how-we-measure-and-why) for what that does and does not rule out). Brackets are 95%
+bootstrap intervals (1,000 resamples). Full tables: [`docs/RESULTS.md`](docs/RESULTS.md) §13–15.
 
-### typed-decisions
+### Benchmarks with real labels
 
-400 cases, 2,000 decisions, gold is a teacher distribution
-([LocalLLaMA/typed-decisions](https://huggingface.co/datasets/LocalLLaMA/typed-decisions), rev `f7a2487edd7a`).
+<p align="center"><img src="docs/img/public_benchmarks.png" alt="zero-shot accuracy on benchmarks with real labels" width="760"></p>
 
-<p align="center"><img src="docs/img/typed_decisions.png" alt="typed-decisions accuracy" width="820"></p>
-
-| Model | Mode | Accuracy | KL ↓ | Brier ↓ |
-|---|---|---|---|---|
-| meraGPT Decider 1 (proprietary) | leaderboard | 0.768 | 0.096 | 0.052 |
-| TypeSafe Jev 1.13 (proprietary) | leaderboard | 0.727 | 1.442 | 0.148 |
-| Featherless Simple Jev (35B MoE) | leaderboard | 0.716 | 0.488 | 0.176 |
-| OpenDecider tree profile | fitted, 2-fold | **0.686** [0.67, 0.71] | – | **0.106** |
-| OpenDecider 2B→9B stitched | zero-shot | **0.643** [0.62, 0.67] | **0.240** | 0.135 |
-| OpenDecider 2B | zero-shot | 0.577 | 0.324 | 0.168 |
-| Qwen3.5-9B letter scores | zero-shot | 0.573 | 0.899 | 0.344 |
-
-Leaderboard rows are self-reported on the dataset card (read 2026-09-28). Specialist models trained on the benchmark's
-own train split score higher (Verdict 2.0: 0.771, Laya: 0.766).
-
-The gold labels come from a teacher model, so accuracy measures agreement with that teacher, not correctness. The
-dataset card gives two ceilings: 0.704 for a model fitted to the factors that generated each case ("perfect scenario
-understanding") and 0.735 for the teacher agreeing with itself. It reads about 0.75 as saturation: scores above it
-mostly reflect the teacher's quirks.
-
-We do not train on the typed-decisions train split. Its labels are the outputs of a ~4B teacher model on four
-synthetic workflows, so fitting them is teacher distillation for one benchmark, and the card itself warns that high
-scores reflect the teacher's quirks. The headline numbers are zero-shot. The tree-profile row is the only one fitted to
-benchmark labels (out-of-fold, a few hundred parameters); it shows what a per-customer decision profile does with
-labeled data, and is not a zero-shot result.
-
-### Public benchmarks
-
-<p align="center"><img src="docs/img/public_benchmarks.png" alt="public benchmark accuracy" width="760"></p>
-
-| | Banking77 (8-way) | Prompt-injection detection | OpenBookQA | CommonsenseQA | PubMedQA |
+| | Banking77 (8 intents) | Prompt-injection detection | OpenBookQA | CommonsenseQA | PubMedQA |
 |---|---|---|---|---|---|
-| OpenDecider 2B | 0.819 | 0.767 | 0.686 | 0.639 | 0.849 |
-| 2B→9B stitched | 0.869 | 0.750 | 0.850 | 0.785 | **0.898** |
-| Qwen3.5-9B zero-shot | 0.931 | 0.819 | 0.894 | 0.813 | 0.883 |
-| OpenDecider 2B + 9B profile | **0.956** | **0.931** | 0.890 | 0.800 | 0.887 |
-| OpenDecider stitched 9B + 9B profile | 0.950 | 0.897 | **0.900** | 0.810 | **0.899** |
-| Jev (third-party report) | 0.838 | 0.870 | 0.942 | 0.881 | – |
+| OpenDecider 9B | 0.875 [0.82, 0.93] | 0.810 [0.74, 0.87] | 0.884 [0.86, 0.91] | 0.800 [0.78, 0.83] | **0.891** [0.87, 0.91] |
+| OpenDecider 2B | 0.831 [0.78, 0.89] | 0.681 [0.59, 0.77] | 0.670 [0.63, 0.71] | 0.651 [0.62, 0.68] | 0.845 [0.82, 0.87] |
+| Qwen3.5-9B, letter scores (our run) | **0.931** [0.89, 0.97] | 0.819 [0.75, 0.89] | 0.894 [0.87, 0.92] | 0.813 [0.79, 0.84] | 0.883 [0.86, 0.90] |
+| Jev 1.13, third-party reports | 0.838 [a] | 0.870 [a] | 0.942 [b] | 0.881 [b] | – |
 
-All values are accuracy. Prompt-injection detection is a classification task
-([deepset/prompt-injections](https://huggingface.co/datasets/deepset/prompt-injections), 116 held-out texts): the
-model labels each text as an injection attempt or a normal request. 0.931 means 93.1% of those texts got the right
-label; the errors include both missed injections and false alarms. It does not measure whether the model itself
-resists injected instructions inside a state. That is a separate test and not done yet.
+- Sizes: Banking77 8 intents × 20 (160), deepset/prompt-injections test split (116), OpenBookQA test (500),
+  CommonsenseQA validation (1,000), PubMedQA labelled (890).
+- Qwen3.5-9B letter scores: the same 9B backbone (Q4_0 GGUF) answering with option letters, log-probabilities
+  renormalized over the options. It is the natural baseline: OpenDecider 9B is within about 1 to 2 points of it on four
+  sets and ahead on PubMedQA; it adds `none`, calibrated types, order invariance and the decision API on top.
+- Jev numbers were not reproduced here (no API access) and come from different splits:
+  [a] AY Automate, [Jev vs LLM benchmark](https://www.ayautomate.com/blog/jev-vs-llm-benchmark): Banking77 160 items (same
+  size as ours, intents not listed); injection detection on 400 deepset texts. [b] scienthoon,
+  [jev-ood-calibration](https://github.com/scienthoon/jev-ood-calibration): OpenBookQA and CommonsenseQA validation
+  splits. Retrieved 2026-09-23. Our results are consistent with Jev being ahead on knowledge-heavy multiple choice and
+  injection detection, and behind on Banking77.
+- Prompt-injection detection is a classification task: the model labels each text as an injection attempt or a
+  normal request. It does not measure whether the model itself resists instructions injected into a state.
 
-### `none` option (no extra training)
+### Prompt-injection detection
 
-Held-out questions from the training families (clinc, massive, dbpedia, arc, snli), plus questions paired with an
-unrelated state. AUROC measures how well P(none) separates unanswerable from answerable questions.
+| | Injections caught | False alarms | AUROC |
+|---|---|---|---|
+| OpenDecider 9B | 39 / 60 | 1 / 56 | 0.957 |
+| OpenDecider 2B | 24 / 60 | 1 / 56 | 0.835 |
 
-| Case | 2B: mean P(none) | 2B: AUROC | 9B stitched: mean P(none) | 9B stitched: AUROC |
+The models rank injections well but are conservative: the mild injections in this benchmark get probabilities around
+0.3 to 0.5. With 25 to 50 labelled examples, isotonic calibration (`POST /v1/calibrate`) moves the threshold; on the
+stitched 9B this raised accuracy to 0.84 to 0.85. That is a fitted result, measured on halves of the benchmark itself,
+and is reported separately in `docs/RESULTS.md` §14.
+
+### `none` option and conformal sets
+
+Held-out questions from the five benchmarks above, asked as written, with the correct option removed, with only the two
+most plausible wrong options left, or about an unrelated state. AUROC of P(none) against the answerable questions:
+
+| | Correct option removed | Only plausible wrong options | Unrelated state |
+|---|---|---|---|
+| OpenDecider 9B | 0.893 [0.87, 0.91] | 0.880 [0.86, 0.90] | 0.808 [0.79, 0.83] |
+| OpenDecider 2B | 0.817 [0.79, 0.84] | 0.803 [0.78, 0.83] | 0.816 [0.79, 0.84] |
+| Previous 2B release (no `none` training) | 0.716 [0.68, 0.74] | 0.760 [0.73, 0.79] | 0.854 [0.84, 0.87] |
+
+Conformal sets at α = 0.1, with the calibration scores stored in each checkpoint (fitted on our own training
+families, so these benchmarks are a distribution shift):
+
+| | Coverage (answerable) | Mean set size | Abstains: answerable | Abstains: correct option removed | Abstains: unrelated state |
+|---|---|---|---|---|---|
+| OpenDecider 9B | 0.962 | 1.47 | 35% | 72% | 93% |
+| OpenDecider 2B | 0.947 | 2.07 | 61% | 85% | 87% |
+
+Coverage stays above the 90% target under this shift, and the models abstain far more often when no listed option
+is right. The sets are wider than they would be in-distribution; refit them on your own labels (`docs/RESULTS.md`
+§13.4).
+
+### Memory and latency (Jetson AGX Orin)
+
+Measured on the previous release, which used the same architecture and backbones; re-measurement on the new
+checkpoints is in progress. One fresh process per config; accuracy columns are omitted here because they belonged
+to the previous heads.
+
+| Model, weights / cache | Weight memory | Peak GPU memory, 0.8k / 3.7k / 15k-token state | Latency, same states | Stored state, 15k tokens |
 |---|---|---|---|---|
-| Answerable (correct option listed) | 0.097 | – | 0.021 | – |
-| Correct option removed | 0.430 | 0.845 | 0.301 | 0.945 |
-| State unrelated to the question | 0.151 | 0.795 | 0.095 | 0.925 |
-
-Accuracy on answerable questions: 0.892 (2B), 0.916 (9B). A learned `none` vector with only its two parameters trained
-did worse (unrelated-state AUROC 0.537). See [`docs/roadmap_designs.md`](docs/roadmap_designs.md).
-
-### Memory and quantization (Jetson AGX Orin, 2B backbone, no retraining)
-
-The model was trained with int8 weights and an int8 cache. Memory and latency come from one fresh process per
-config. Accuracy: 500 typed-decisions questions (first 100 test cases), Banking77 8-way (160), prompt-injection
-detection (116).
-
-| Weights / cache | Weight memory | Peak GPU memory, 0.8k / 3.7k / 15k-token state | Latency, same states | Stored state, 15k tokens | typed-decisions | Banking77 | Injection detection |
-|---|---|---|---|---|---|---|---|
-| int8 / int8 (default) | 1.88 GB | 2.4 / 2.5 / 3.1 GB | 0.86 / 1.58 / 4.92 s | 106 MB | 0.434 | 0.825 | 0.776 |
-| int8 / int4 | 1.88 GB | 2.4 / 2.5 / 3.1 GB | 0.81 / 1.47 / 4.60 s | 67 MB | 0.446 | 0.819 | 0.767 |
-| NF4 / int8 | 1.26 GB | 1.8 / 1.8 / 2.5 GB | 0.64 / 1.33 / 4.43 s | 106 MB | 0.404 | 0.756 | 0.707 |
-| NF4 / int4 | 1.26 GB | 1.8 / 1.8 / 2.5 GB | 0.64 / 1.29 / 4.38 s | 67 MB | 0.410 | 0.781 | 0.698 |
+| 2B, int8 / int8 (default) | 1.88 GB | 2.4 / 2.5 / 3.1 GB | 0.86 / 1.58 / 4.92 s | 106 MB |
+| 2B, int8 / int4 | 1.88 GB | 2.4 / 2.5 / 3.1 GB | 0.81 / 1.47 / 4.60 s | 67 MB |
+| 2B, NF4 / int8 | 1.26 GB | 1.8 / 1.8 / 2.5 GB | 0.64 / 1.33 / 4.43 s | 106 MB |
+| 9B, int8 (from Q4_0 GGUF) / int8 | 8.56 GB | 9.8 / 9.9 / 11.0 GB | 2.64 / 5.42 / 15.23 s | 281 MB |
 
 - Option rows attend to one shared copy of the state's K/V through fused SDPA (memory-efficient kernel, scores never
-  materialized) instead of each row getting its own full-precision copy. Before this, peak memory at 15k tokens was
-  7.7 GB (int8) and 7.0 GB (NF4 / int4).
-- A 4-bit cache is safe: accuracy stays within noise. The stored state is small
-  either way because the backbone has only 6 attention layers with 2 KV heads; the fixed-size GDN recurrent state
-  stays bf16.
-- 4-bit weights (NF4) save 0.6 GB and 10 to 26% latency (more on short states), but cost 4 to 8 points on the public sets.
-  Retraining the head on NF4 features may recover part of that.
-- The remaining growth with state length is the one-time activations of the state pass. Chunked prefill would
-  reduce it.
+  materialized), so memory grows slowly with the number of options.
+- A 4-bit cache keeps accuracy within noise; 4-bit weights cost accuracy because the heads were trained on int8
+  features (`docs/RESULTS.md` §9, §12).
 
-Set `weight_quant: nf4` and `kv_quant: int4` in `configs/backbone*.yaml`. Script: `scripts/bench_quant.py`.
+### typed-decisions (secondary: agreement with a teacher model)
 
-### Explanations (`/v1/explain`, 2B backbone, 24 typed-decisions cases)
+400 cases, 2,000 decisions ([LocalLLaMA/typed-decisions](https://huggingface.co/datasets/LocalLLaMA/typed-decisions),
+rev `f7a2487edd7a`). Each decision's gold label is the averaged answer of a ~4B teacher model, so accuracy measures
+agreement with that teacher, not correctness. The card lists the teacher's agreement with itself at 0.735.
 
-The decision model re-reads only the explanation, with every option name masked, and tries to reach the same decision.
-
-| Check | Value |
-|---|---|
-| Decision recovered from the explanation alone (greedy) | 79% (mismatched explanation: 29%) |
-| P(decision) from the explanation alone, greedy / best of 4 | 0.72 / 0.87 (mismatched: 0.32, empty: 0.29) |
-| Drop in P(decision) when the top cited record is removed | 0.26 (mean P(decision): 0.52) |
-| Latency per greedy explanation, Orin, warm | 7.9 s median: evidence 4.7 s, decoding 2.4 s (about 70 tokens), check 0.7 s |
-
-Decoding uses a static cache, a CUDA-graph decode step and a packed 8-bit LM head (`docs/RESULTS.md` §12.3). It was
-16.5 s per explanation before. The first request at a new input length is slower (10 to 90 s) while GemLite tunes its
-kernels for that shape. The 9B takes 24.6 s (was 75 s).
-
-### Prefix cache (Jetson AGX Orin, 2B backbone)
-
-A state grows by one record between two requests. The top answer matched the uncached path on every question.
-
-| State tokens | Uncached | With cache | Max probability difference |
+| Model | Mode | Accuracy | KL ↓ |
 |---|---|---|---|
-| 883 | 0.98 s | 0.83 s | 0.017 |
-| 3,869 | 1.87 s | 0.98 s | 0.026 |
-| 15,177 | 6.01 s | 1.69 s | 0.007 |
+| meraGPT Decider 1 | leaderboard, self-reported | 0.768 | 0.096 |
+| TypeSafe Jev 1.13 | leaderboard, self-reported | 0.727 | 1.442 |
+| OpenDecider 9B | zero-shot | 0.614 [0.59, 0.64] | 0.407 |
+| Qwen3.5-9B, letter scores | zero-shot | 0.573 [0.55, 0.60] | 0.899 |
+| OpenDecider 2B | zero-shot | 0.485 [0.46, 0.51] | 0.342 |
+
+Leaderboard rows are from the dataset card (read 2026-09-28). The clean-provenance 9B scores below the previous release
+(0.643), which trained on SNLI and BoolQ; we report the drop and do not train on this benchmark to recover it.
+
+### Explanations and prefix cache
+
+Measured on the previous 2B release (same architecture and backbone); not re-measured for this release.
+
+- Explanations (`/v1/explain`, 24 cases): the decision is recovered from the explanation alone, option names masked,
+  79% of the time (29% with a mismatched explanation). About 8 s per explanation on the Orin (2B), 25 s (9B).
+- Prefix cache: a state that grows by one record costs 0.83 s instead of 0.98 s at 0.9k tokens and 1.69 s instead of
+  6.01 s at 15k; the top answer matched the uncached path on every question.
+
+## How we measure, and why
+
+This project started as a scientific check of public claims about Jev. It has become a useful tool in its own right,
+but we keep the standard it started with. In our view much of the evaluation of decision models has drifted away from
+measurement, so we state our rules and where we fall short of them.
+
+- **Real labels first.** typed-decisions, the most cited benchmark for decision models, labels each decision with the
+  answers of a ~4B teacher model; its card lists the teacher's self-agreement at 0.735, so scores near that mostly
+  measure agreement with one model's habits. TypeSafe's own launch evaluations likewise score agreement with frontier
+  models rather than ground truth ([launch post](https://typesafe.ai/blog/introducing-system-one-models-and-jev)). We
+  report typed-decisions, as a secondary result; our headline numbers come from benchmarks with human or programmatic
+  labels.
+- **No training on what we report.** A model fine-tuned on a benchmark can pass that benchmark's ceiling.
+  `convaiinnovations/laya-typed-decisions`, a 421M ModernBERT-large model, scores 0.766 on typed-decisions after
+  fine-tuning on that benchmark's four workflows, above the 0.735 teacher ceiling, and says so on its
+  [model card](https://huggingface.co/convaiinnovations/laya-typed-decisions). The card is transparent; the problem is
+  that such scores sit on the same leaderboard as zero-shot ones. We never train on any split of a benchmark we
+  report.
+- **We check for overlap, and report what we find.** `eval/overlap_audit.py` compares every text in our training,
+  validation and calibration data with every benchmark item (`docs/RESULTS.md` §13). No benchmark question or text
+  appears in our data, and no training text shares a 13-word span with one. What remains:
+  - Same domain, different data: CLINC and MASSIVE contain the same banking intents as Banking77 in other words, so
+    Banking77 measures new wording of familiar intents, not unseen intents. Science multiple choice (QASC, CODAH) and
+    injection prompts (TrustAIRLab, from the same public prompt communities as deepset) overlap in the same way.
+  - Two deepset items have a related variant in our data: an adapted "act as an interviewer" prompt (in the validation
+    split, with the opposite label) and a Gandalf attack using the same "ignore the above … initial instructions"
+    pattern (training split, same label).
+  - The Qwen3.5 backbones were pretrained on undisclosed data; OpenBookQA and CommonsenseQA have been public since
+    2018–2019, so we cannot rule out that the backbone saw them. This applies to every LLM-based result here, the
+    letter-score baseline included.
+- **Benchmarks influenced our choices.** We generated prompt-injection training attacks after the first clean model
+  scored poorly on deepset, made the second set subtler because deepset's injections are mild, and chose the released
+  checkpoints by comparing versions on these same benchmarks. No benchmark text was used, but these decisions make our
+  numbers on them somewhat optimistic.
+- **Intervals, splits and code.** We give 95% bootstrap intervals, the exact splits, the code behind every number, and
+  a source for every number we did not measure (`docs/RESULTS.md`, "Sources for numbers not measured here").
+- **Fitted is not zero-shot.** Calibration with labels and decision profiles are useful, and we show them, labelled as
+  fitted and kept out of the headline tables.
+- **No claims about Jev's internals.** We only say whether a result is consistent with public observations about it.
 
 ## How it works
 
@@ -187,7 +221,7 @@ flowchart LR
   B --> L["layer combine<br/>DepthAttn (2B) or ridge stitch (9B)"]
   L --> T["decision trunk<br/>one token per option, no positions"]
   T --> H["pointer head<br/>softmax over options + none"]
-  H --> P["decision profile<br/>temperature, beta, isotonic, trees"]
+  H --> P["calibration<br/>temperature per type, profiles, conformal sets"]
   P --> O["probabilities"]
 ```
 
@@ -195,10 +229,12 @@ flowchart LR
    questions adds little latency.
 2. Options are tokens, not vocabulary. The head scores any option set the caller sends. Without slot embeddings the
    trunk is permutation-equivariant.
-3. "none of the above" is added to every question as a normal option. It competes with the real options in the same
-   softmax. `probs` is renormalized over your options, and `none` is reported next to it.
-4. A decision profile maps raw probabilities to calibrated ones. It can also pool several sources (the trunk, the
-   stitched 9B, the 9B's own letter scores).
+3. Small VeRA adapters adapt the frozen backbone (every layer on the 2B; the top 16 layers, option rows only, on the
+   9B).
+4. "none of the above" is added to every question as a normal option and competes in the same softmax. `probs` is
+   renormalized over your options, and `none` is reported next to it.
+5. The 9B starts from the 2B's trunk through a closed-form ridge map between the two backbones' features ("stitch"),
+   then trains on the same data.
 
 Design notes: [`docs/roadmap_designs.md`](docs/roadmap_designs.md),
 [`docs/branched_shared_prefix_math.md`](docs/branched_shared_prefix_math.md),
@@ -208,19 +244,17 @@ Design notes: [`docs/roadmap_designs.md`](docs/roadmap_designs.md),
 
 | | Minimum | Tested |
 |---|---|---|
-| GPU memory, 2B backbone | 2.4 GB for states up to about 1k tokens, 2.5 GB up to 4k, 3.1 GB up to 15k (int8 weights: 1.9 GB). With 4-bit weights and cache: 1.8 / 1.8 / 2.5 GB | Jetson AGX Orin 64 GB (inference), DGX Spark (training) |
-| GPU memory, 9B backbone | 9.8 GB for states up to about 1k tokens, 9.9 GB up to 4k, 11.0 GB up to 15k (int8 weights: 8.6 GB) | Jetson AGX Orin 64 GB |
+| GPU memory, 2B backbone | 2.4 GB for states up to about 1k tokens, 3.1 GB up to 15k (int8 weights: 1.9 GB) | Jetson AGX Orin 64 GB |
+| GPU memory, 9B backbone | 9.8 GB for states up to about 1k tokens, 11.0 GB up to 15k (int8 weights: 8.6 GB) | Jetson AGX Orin 64 GB |
 | Host RAM | 12 GB peak while loading the 2B backbone | same |
-| Disk, 2B backbone | 4.3 GB weights + about 0.1 GB checkpoint | same |
-| Disk, 9B backbone (stitched) | 5.2 GB Q4_0 GGUF (loaded directly, see `src/opendecider/gguf_load.py`) + 0.23 GB checkpoint | same |
-| Disk, Python environment | about 6 GB (PyTorch, transformers) | same |
+| Disk | 2B: 4.3 GB backbone + 0.1 GB checkpoint; 9B: 5.2 GB Q4_0 GGUF + 0.1 GB checkpoint; Python environment about 6 GB | same |
 | Python | 3.12 | 3.12 on aarch64 (JetPack) |
-| CPU only | Unit tests only (tiny random model) | – |
+| CPU only | the 2B `int8` variant runs (slowly); unit tests use a tiny random model | – |
 
-Weights are loaded as int8 (or NF4, see [Memory and quantization](#memory-and-quantization-jetson-agx-orin-2b-backbone-no-retraining)), so GPU memory is lower
-than the bf16 download size. The prefix cache adds up to
-`OPENDECIDER_STATE_CACHE_MB` (default 2 GB). The code keeps at least 4 GB of disk
-free and refuses downloads that would go below that.
+GPU memory figures were measured on the previous release (same backbones). Training needs more: about 20 GB (2B) and
+34 GB (9B) of GPU memory on the Orin with the release configs. The prefix cache adds up to
+`OPENDECIDER_STATE_CACHE_MB` (default 2 GB). The code keeps at least 4 GB of disk free and refuses downloads that would
+go below that.
 
 ## Quickstart
 
@@ -237,38 +271,40 @@ python3.12 -m venv .venv && .venv/bin/pip install -e ".[gguf,quant]"
 bash examples/request.sh
 ```
 
-Output of the quickstart from a fresh clone (2B, int8 backbone, Jetson AGX Orin):
+Output of the quickstart (2B, int8 backbone, Jetson AGX Orin):
 
 ```text
-route     -> billing    (billing: 0.70, technical: 0.00, refund: 0.30, other: 0.00)  none: 0.00
-urgent    -> yes        (yes: 0.80, no: 0.20)  none: 0.04
-severity  -> high       (low: 0.03, medium: 0.29, high: 0.58, critical: 0.10)  none: 0.01
+route     -> billing    (billing: 0.63, technical: 0.00, refund: 0.35, other: 0.02)  none: 0.03
+urgent    -> yes        (yes: 0.59, no: 0.41)  none: 0.07
+severity  -> medium     (low: 0.23, medium: 0.29, high: 0.28, critical: 0.20)  none: 0.16
 ```
 
-The first call includes one-time warm-up (about 4.5 s on the Orin); later calls on a state this size take about
-0.8 s.
+The ticket says little about severity, and the calibrated 2B says so with a flat distribution. The first call includes
+one-time warm-up (2.7 s here); later calls on a state this size take about 0.8 s.
 
 Backbones are cached under `models/` (or `$OPENDECIDER_MODELS`). Every download checks that at least 4 GB of disk
-stays free. Without a CUDA GPU the `int8` variant runs on CPU with reference kernels (slow).
+stays free. Without a CUDA GPU the `int8` variant of the 2B runs on CPU with reference kernels (slow).
 
 ## Checkpoints
 
-Both checkpoints are in this repository under `checkpoints/` (fp16 safetensors, shards under 50 MB, no Git LFS).
-They contain only what was trained; the frozen backbone is downloaded from its original repository at a pinned
-revision. Each folder has a model card (`README.md`) with results and data licenses.
+Both checkpoints are in this repository under `checkpoints/` (fp16 safetensors, shards under 50 MB, no Git LFS). They
+contain only what was trained; the frozen backbone is downloaded from its original repository at a pinned revision.
+Each folder has a model card (`README.md`) with results, backbone variants and data licenses.
 
-| Checkpoint | Trained part | Backbone variants (`backbone=`) | Zero-shot typed-decisions |
-|---|---|---|---|
-| `checkpoints/opendecider-2b` | 25.4M parameters, 48 MB | `int8` (default), `w8`, `nf4`, `awq` | 0.577 |
-| `checkpoints/opendecider-9b-stitched` | 57.3M parameters, 109 MB | `gguf-q4_0` (default), `int8` | 0.643 |
+| Checkpoint | Trained part | Backbone variants (`backbone=`) |
+|---|---|---|
+| `checkpoints/opendecider-2b` | 25.4M parameters, 50 MB | `int8` (default), `w8`, `nf4`, `awq` |
+| `checkpoints/opendecider-9b` | 58.1M parameters, 112 MB | `gguf-q4_0` (default) |
+
+The heads were trained on the default variants' features; the 4-bit 2B variants (`awq`, `nf4`) work but were not
+trained on. The previous checkpoints (trained with share-alike data, including `opendecider-9b-stitched`) are in the
+git history before this release.
 
 ```python
 from opendecider.hub import load_decider
-dec = load_decider("checkpoints/opendecider-9b-stitched")    # Q4_0 GGUF backbone from unsloth/Qwen3.5-9B-MTP-GGUF
+dec = load_decider("checkpoints/opendecider-9b")                       # Q4_0 GGUF backbone
 dec = load_decider("checkpoints/opendecider-2b", backbone="awq", kv_quant="int4")
 ```
-
-4-bit backbone variants (`awq`, `nf4`) lose 4 to 8 points on the public sets: the head was trained on int8 features.
 
 ## API
 
@@ -280,7 +316,8 @@ curl -s localhost:8000/v1/decide -H 'content-type: application/json' -d '{
                  "options": ["billing", "technical", {"name": "refund", "description": "customer asks for money back"}, "other"]},
     "urgent":   {"type": "noul",  "prompt": "Does this need a reply within the hour?"},
     "severity": {"type": "score", "prompt": "How severe is it?", "levels": ["low", "medium", "high", "critical"]}
-  }
+  },
+  "conformal": {"alpha": 0.1}
 }'
 ```
 
@@ -291,13 +328,15 @@ curl -s localhost:8000/v1/decide -H 'content-type: application/json' -d '{
 | `POST /v1/explain` | Optional. Explanation, evidence spans and a faithfulness score for one question. |
 | `GET /healthz` | Health check. |
 
-Each answer has `value`, `probs`, `confidence`, and `std` (when `sampler.k > 1`). Each answer also has `none`, the
-probability that no listed option is supported. Set `"none": false` on a question to turn it off. Invalid requests return 400. Probabilities sum to 1
-within 1e-6.
+Each answer has `value`, `probs`, `confidence`, `none` (the probability that no listed option is supported) and `std`
+(when `sampler.k > 1`). With `conformal`, it also has `set` (the options that cannot be ruled out at level α) and
+`abstain` (true unless the set is exactly one option). Set `"none": false` on a question to turn `none` off. Invalid
+requests return 400. Probabilities sum to 1 within 1e-6.
 
 `method: "auto"` compares identity, shrunk temperature, beta, ETS, temperature plus per-option bias, histogram
-binning (binary questions) and shrunk isotonic by cross-validated log loss. It keeps the simplest one within one
-standard error of the best.
+binning (binary questions) and shrunk isotonic by cross-validated log loss, and keeps the simplest one within one
+standard error of the best. Profiles also store conformal scores, so `conformal` uses your labels when a profile is
+given.
 
 Environment variables:
 
@@ -313,92 +352,88 @@ Environment variables:
 
 ### Known limitations
 
-- On sets with real labels, the stitched 9B trails Jev on knowledge-heavy multiple choice (OpenBookQA 0.850 vs 0.942,
-  CommonsenseQA 0.785 vs 0.881) and on injection detection (0.750 vs 0.870), and trails its own backbone's zero-shot
-  letter scores on four of five sets. typed-decisions (0.643 vs 0.727 and 0.768) measures agreement with a teacher
-  model, not correctness (see [typed-decisions](#typed-decisions)).
-- The stitched 9B is slightly below the 2B on prompt-injection detection (0.750 vs 0.767).
-- 4-bit weights cost 4 to 8 points on the public sets with every method tried, AWQ included, because the head was
-  trained on int8 features. Retraining the head on 4-bit features is the planned fix.
-- Tree profiles overfit below about 250 labels. Use `method: "auto"` and let cross-validation choose.
-- Latency is 0.8 to 1.5 s per request on the Orin (2B) for states up to about 4k tokens, and 4.6 s at 15k. The
-  passes are compute-bound: CUDA graphs were measured and made it slower (`docs/RESULTS.md` §12). The levers are
-  fewer FLOPs (question cache, prefix cache, retrieval) and faster quantized GEMMs.
-- Explanations take about 8 s (2B) and 25 s (9B) each on the Orin once kernels are tuned, and can contain small
-  factual slips. Most of the time is the evidence pass (one decision per removed record), not decoding.
+- Knowledge-heavy multiple choice and injection detection: OpenDecider 9B is below the third-party Jev numbers
+  (OpenBookQA 0.884 vs 0.942, CommonsenseQA 0.800 vs 0.881, injection detection 0.810 vs 0.870, on different splits)
+  and slightly below its own backbone's letter scores on four of five sets.
+- Prompt-injection detection is conservative: mild injections are often scored below 0.5. Few-label calibration fixes
+  most of it; zero-shot it misses many.
+- The 9B is overconfident on Banking77 (NLL 0.77 vs 0.48 for the stitched model before training) despite similar
+  accuracy.
+- typed-decisions agreement dropped with the move to clean-provenance data (9B: 0.614 vs 0.643).
+- Conformal sets with the checkpoint's own scores keep coverage on other benchmarks but are wide (2.1 options on
+  average at α = 0.1). Refit them on your labels.
+- 4-bit backbone variants (`awq`, `nf4`) were not trained on; their features differ from the int8 ones the head saw.
+- Latency on the Orin is about 1 s per request (2B) for states up to about 1k tokens and grows with state length.
+  The passes are compute-bound: CUDA graphs were measured and made it slower (`docs/RESULTS.md` §12).
+- Explanations take about 8 s (2B) and 25 s (9B) on the Orin and can contain small factual slips.
 - The prefix cache matches the uncached path to within 0.007 to 0.026 in probability (int8 cache boundaries), not
   bit-exactly.
-- Dense retrieval uses mean-pooled backbone states, which is a weak retriever. BM25 is the default.
 - There is no Jev API access. All Jev numbers come from TypeSafe or third parties.
-- Checkpoints are not published yet.
 
 ### Not measured yet
 
-Everything below is either running or planned. Results will be added here and in [`docs/RESULTS.md`](docs/RESULTS.md).
-
 | Area | Status |
 |---|---|
-| W8A8 without the accuracy loss (SmoothQuant-style calibration) | Planned. W8A8 is 2.5x faster on the 9B at 0.8k tokens but loses 5 to 6 points; see `docs/RESULTS.md` §12. |
-| 9B AWQ | Needs ~8.5 GB of disk; planned on another machine. |
-| 9B training (warm start from the stitched head) | Planned, on a separate training machine. |
-| GPUs other than the Jetson AGX Orin (desktop and data-center cards, DGX Spark inference) | Planned. All memory and latency numbers are from one Orin 64 GB. |
+| Explanation quality and prefix-cache equivalence on the new checkpoints | Planned. Current numbers are from the previous release. |
+| W8A8 without the accuracy loss (SmoothQuant-style calibration) | Planned. W8A8 was 2.5x faster on the 9B at 0.8k tokens but lost 5 to 6 points (`docs/RESULTS.md` §12). |
+| GPUs other than the Jetson AGX Orin | Planned. All memory and latency numbers are from one Orin 64 GB. |
 | GPU tests in CI | Planned. Unit tests run on CPU with a tiny random model; one GPU test covers the fused attention path. |
-| Confidence intervals for the quantization and explanation tables | Planned. Those tables use single runs on subsets (500 + 276 questions, 24 cases). |
-| `none` option on out-of-distribution sets and hard negatives | Planned. Current numbers use held-out questions from the training families. |
 | Robustness to prompt injection inside a state (not detection) | Planned. |
 | Behavioral probe battery on Jev itself | Blocked on API access. |
-| Retrieval store inside `/v1/decide`, and a dedicated embedding model | Planned. The store is a library with a synthetic recall benchmark. |
-| Explanations: faster evidence pass (reuse the shared state prefix across the removed-record copies), saved kernel tuning, human review | Planned. Decoding is optimized; current: 7.9 s (2B) and 24.6 s (9B) per explanation, warm. |
-| More than 255 options (two-stage path) at scale | Planned. Implemented and unit-tested, not benchmarked. |
-| Languages other than English | Planned. |
+| More than 255 options (two-stage path) at scale | Implemented and unit-tested, not benchmarked. |
+| Languages other than English | Partly: the generated injection data includes German, Spanish and French; not benchmarked. |
 
 ## Roadmap
 
 - [x] Prefix cache across requests (exact, per-record chunks).
 - [x] Automatic calibrator selection in `/v1/calibrate`.
-- [x] `none` option ("none of the above", no training needed).
+- [x] `none` option, trained.
+- [x] Conformal prediction sets and abstention in the API.
 - [x] Retrieval store (BM25 + dense) and `/v1/explain`.
-- [x] Released checkpoints (2B, 9B stitched) with pinned backbone variants.
-- [ ] Warm-start 9B training from the stitched checkpoint.
-- [ ] Conformal prediction sets and abstention in the API.
+- [x] Clean-provenance checkpoints (2B, 9B with warm-started training).
 - [ ] Consistency constraints across questions.
-- [ ] CUDA graphs and TensorRT for p50 < 150 ms on the Orin.
+- [ ] Faster explanations (shared-prefix evidence pass).
+- [ ] TensorRT for p50 < 150 ms on the Orin.
 
 ## Reproduce
 
 ```bash
-.venv/bin/python -m pytest -q                       # CPU unit tests on a tiny random model
+.venv/bin/python -m pytest -q                                 # CPU unit tests on a tiny random model
 
-# zero-shot LLM baseline through any OpenAI-compatible server with logprobs
-.venv/bin/python -m eval.typed_decisions llm --split test --name td-9b --base-url http://127.0.0.1:8080
-.venv/bin/python -m eval.typed_decisions od  --split test --name td-x2b --ckpt runs/x2b/model.pt
+# clean-provenance corpus (licenses and revisions: data/MANIFEST.md)
+.venv/bin/python data/builders/clean_train.py --out data/clean_train
+.venv/bin/python data/builders/injection_gen.py --out data/clean_train --n 3000                       # blunt set
+.venv/bin/python data/builders/injection_gen.py --out data/clean_train --n 3000 --style subtle --seed 7
 
-# stitch the 2B head onto the 9B backbone (closed-form ridge), then evaluate
-.venv/bin/python scripts/stitch_backbone.py targets && .venv/bin/python scripts/stitch_backbone.py fit
-bash scripts/stitch_eval.sh
+# 2B, stitch to 9B, 9B (one job at a time; scripts/memwatch.sh guards memory on unified-memory devices)
+.venv/bin/python -m opendecider.train --config configs/train_2b_clean.yaml --set train.name=x2b-clean3
+.venv/bin/python scripts/stitch_backbone.py targets --ckpt runs/x2b-clean3/model.pt --out targets.pt --n-states 300 \
+    --files data/synthetic/train.jsonl data/clean_train/{kept_public,topics,reading,knowledge,kept_knowledge,kept_injection,injection,ordinal,injgen,injgen2}_train.jsonl
+.venv/bin/python scripts/stitch_backbone.py fit --ckpt runs/x2b-clean3/model.pt --targets targets.pt \
+    --backbone-path models/qwen3.5-9b-gguf/Qwen3.5-9B-Q4_0.gguf --out runs/x2b-clean3-stitch9b/model.pt
+.venv/bin/python -m opendecider.train --config configs/train_9b_clean.yaml --set train.name=x9b-clean3
 
-# decision profiles and calibration learning curves (out-of-fold)
-.venv/bin/python -m eval.tree_head --typed --sources runs/td-x2b runs/td-x9b-stitch runs/td-9b --name tree-typed
-.venv/bin/python -m eval.calib_curve --typed --no-trees --sources runs/td-x2b runs/td-x9b-stitch runs/td-9b
-
-# none option (explicit text; the learned-vector variant trains with --out), prefix cache, recall, explanations
-.venv/bin/python scripts/train_none.py --ckpt runs/x2b/model.pt --explicit "none of the above"
-.venv/bin/python scripts/bench_state_cache.py --ckpt runs/x2b/model.pt
-.venv/bin/python -m eval.store_recall --embedder opendecider.embed:x2b_embedder
-.venv/bin/python -m eval.explain_eval --ckpt runs/x2b/model.pt
+# evaluation
+.venv/bin/python -m eval.evaluate --ckpt runs/x9b-clean3/model.pt --save-preds --name public-x9b-clean3 \
+    --data data/public/{banking77_8way,prompt_injections,openbookqa,commonsenseqa,pubmedqa}.jsonl
+.venv/bin/python -m eval.typed_decisions od --split test --name td-x9b-clean3 --ckpt runs/x9b-clean3/model.pt
+.venv/bin/python -m eval.none_eval --ckpt runs/x9b-clean3/model.pt --name none-x9b-clean3
+.venv/bin/python -m eval.overlap_audit                        # training data vs every benchmark
+.venv/bin/python scripts/bench_quant.py --ckpt runs/x2b-clean3/model.pt --configs int8:int8 awq:int8
+.venv/bin/python scripts/export_checkpoints.py && .venv/bin/python scripts/check_release.py
 ```
 
-Backbone revisions are pinned in `configs/backbone*.yaml`. Dataset sources and licenses are in
-[`data/MANIFEST.md`](data/MANIFEST.md).
+Backbone revisions are pinned in `configs/backbone*.yaml`. Dataset sources, licenses and the generated data are
+described in [`data/MANIFEST.md`](data/MANIFEST.md).
 
 ## Project layout
 
 ```text
-src/opendecider/   backbone, trunk (v3.py), decider, API, calibration, prefix cache, store, explanations
-eval/              benchmarks, probes, profiles, calibration curves, retrieval recall, explanation eval
-scripts/           training, stitching, benchmarks
-configs/           backbone and model configs (pinned revisions)
-data/              dataset builders and MANIFEST.md (licenses)
+src/opendecider/   backbone, trunk (v3.py), decider, API, calibration, conformal sets, prefix cache, store, explanations
+eval/              benchmarks, abstention, overlap audit, probes, profiles, calibration curves, explanation eval
+scripts/           stitching, export, benchmarks, profiling
+configs/           backbone and training configs (pinned revisions)
+data/              dataset builders, injection generator, MANIFEST.md (licenses)
 docs/              results, landscape survey, designs, figures, logo
 tests/             CPU unit tests (tiny random Qwen3.5-architecture model)
 checkpoints/       released heads (safetensors + config + model card)
@@ -407,14 +442,13 @@ examples/          quickstart.py, request.sh
 
 ## Background
 
-OpenDecider builds on Pointer Networks, Poly-encoders, Perceiver, Flamingo, iTransformer and RLCR, and on the Qwen3.5
-open weights. A survey of related open and commercial projects is in [`docs/LANDSCAPE.md`](docs/LANDSCAPE.md).
+OpenDecider builds on Pointer Networks, Poly-encoders, Perceiver, Flamingo, iTransformer, VeRA and RLCR, and on the
+Qwen3.5 open weights. A survey of related open and commercial projects is in [`docs/LANDSCAPE.md`](docs/LANDSCAPE.md).
 Jev is a product of TypeSafe. This project is not affiliated with TypeSafe.
 
 ## License
 
-Code and released checkpoint weights: [Apache-2.0](LICENSE). See [`NOTICE`](NOTICE).
-The backbones (Qwen3.5 and the listed quantizations) are Apache-2.0 and are downloaded from their own repositories.
-The heads were trained on datasets listed with their licenses in [`data/MANIFEST.md`](data/MANIFEST.md) and in each
-model card. Five of them are CC-BY-SA; whether trained weights count as adapted material under share-alike terms is
-legally unsettled (the heads are classifiers and do not generate text). These checkpoints will be retrained without the CC-BY-SA datasets and re-released with clean provenance.
+Code and released checkpoint weights: [Apache-2.0](LICENSE). See [`NOTICE`](NOTICE). The backbones (Qwen3.5 and the
+listed quantizations) are Apache-2.0 and are downloaded from their own repositories. The training sources and their
+licenses are listed in [`data/MANIFEST.md`](data/MANIFEST.md) and in each model card; none is share-alike,
+non-commercial or unlicensed.

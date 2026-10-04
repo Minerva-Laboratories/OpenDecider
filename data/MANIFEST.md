@@ -135,3 +135,20 @@ Excluded after review (selection): SciNLI (CC-BY-SA upstream), MultiNLI (SA/othe
 (NC-SA), SciTail (no license), ConditionalQA/DROP/Belebele (SA), CondaQA/ROPES/Qasper (upstream text rights), PIQA
 (AFL-3.0), MedMCQA (question copyright unclear), HelpSteer2 (LLM-written responses). bigscience/P3 and
 allenai/natural-instructions are struck from the candidate list above: they contain held-out benchmark tasks.
+
+### 2026-10-02: generated injection attacks inside real text (`data/builders/injection_gen.py` → `data/clean_train/injgen*_*.jsonl`, not redistributed)
+Two sets of 3,000 attacks each, written by an open model into human-written carrier texts from the clean corpus above
+(clinc/massive requests, OASST1 prompts, CUAD excerpts, arXiv abstracts). The model writes inputs only; no model labels
+anything (see the no-teacher rule): every label comes from how the example was built.
+- Generator: Qwen3.5-9B, Q4_0 GGUF from unsloth/Qwen3.5-9B-MTP-GGUF@9716a636 (Apache-2.0), local llama.cpp.
+- Positive ("yes"): the rewrite, kept only if it contains a canary string chosen by the code for that attack (random
+  words from the corpus plus a number), is not a refusal, has no prompt artifacts, and has no overlap with any held-out
+  benchmark (exact or 13-word span).
+- Negative ("no"): the untouched carrier, paired with its attack (same split). Half of the negatives carry the same
+  canary as harmless content, and both sides get the same whitespace normalisation, so neither the canary nor the
+  formatting predicts the label.
+- `injgen` (blunt): 10 attack goals x 10 techniques x 4 placements; English 70%, German 15%, Spanish 10%, French 5%.
+  Attempts 3,514: accepted 3,000, no canary 215, prompt artifacts 284, refusals 15.
+- `injgen2` (subtle): attacks meant to pass a quick human read (same tone as the carrier, one or two sentences, no
+  "ignore previous instructions", tags, delimiters or shouting); outputs with such markers are rejected in code.
+  Attempts 3,843: accepted 3,000, too obvious 464, no canary 229, prompt artifacts 150.

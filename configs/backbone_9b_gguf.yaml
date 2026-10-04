@@ -1,5 +1,5 @@
 # Qwen3.5-9B, Q4_0 GGUF from unsloth/Qwen3.5-9B-MTP-GGUF@9716a636 (config/tokenizer from Qwen/Qwen3.5-9B), loaded as
-# int8 weights on the GPU: the deployment variant `gguf-q4_0` of checkpoints/opendecider-9b-stitched. Apache-2.0.
+# int8 weights on the GPU: the deployment variant `gguf-q4_0` of checkpoints/opendecider-9b. Apache-2.0.
 path: models/qwen3.5-9b-gguf/Qwen3.5-9B-Q4_0.gguf
 repo_id: Qwen/Qwen3.5-9B
 revision: c202236235762e1c871ad0ccb60c8ee5ba337b9a

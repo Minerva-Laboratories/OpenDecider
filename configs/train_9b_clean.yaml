@@ -1,6 +1,6 @@
-# Clean-provenance 9B: warm start from the CLEAN 2B head stitched onto the 9B GGUF backbone (scripts/train_clean.sh
-# step 2), then trained on the same clean corpus with VeRA adapters on all 32 9B layers, on the deployed int8 features.
-# Never warm-start from runs/x9b-gguf-stitch: that head was trained on share-alike data.
+# OpenDecider 9B (checkpoints/opendecider-9b): the clean 2B head stitched onto the Qwen3.5-9B Q4_0 GGUF backbone
+# (scripts/stitch_backbone.py), then trained on the same clean corpus with row-only VeRA on the top 16 layers.
+#   python -m opendecider.train --config configs/train_9b_clean.yaml --set train.name=x9b-clean3
 backbone: configs/backbone_9b_gguf.yaml
 model:
   variant: v3
@@ -13,88 +13,60 @@ model:
   v3_cross: question
   v3_row_format: answer
   v3_lm_feature: true
-  v3_vera_layers: 16
-  v3_vera_scope: rows_top
   v3_vera_rank: 256
-  v3_layer_combine: stitch
-  v3_row_checkpoint: true
+  v3_row_checkpoint: true          # recompute option-row chunks in backward
+  v3_vera_layers: 16
+  v3_vera_scope: rows_top          # option rows only: no backward through the 768-token 9B state pass
+  v3_layer_combine: stitch         # ridge map from 4 9B layers into the 2B trunk space
   v3_stitch_dim: 2048
 train:
+  # clean corpus (data/MANIFEST.md); weights = sampling probability per file
   data:
-  - data/synthetic/train.jsonl
-  - data/clean_train/kept_public_train.jsonl
-  - data/clean_train/topics_train.jsonl
-  - data/clean_train/reading_train.jsonl
-  - data/clean_train/knowledge_train.jsonl
-  - data/clean_train/kept_knowledge_train.jsonl
-  - data/clean_train/kept_injection_train.jsonl
-  - data/clean_train/injection_train.jsonl
-  - data/clean_train/harmful_train.jsonl
-  - data/clean_train/ordinal_train.jsonl
-  - data/clean_train/kept_context_train.jsonl
-  - data/synthetic/uncertainty_train.jsonl
-  - data/clean_train/injgen_train.jsonl
-  - data/clean_train/injgen2_train.jsonl
-  data_weights:
-  - 0.14
-  - 0.15
-  - 0.08
-  - 0.1
-  - 0.06
-  - 0.06
-  - 0.02
-  - 0.08
-  - 0.02
-  - 0.05
-  - 0.09
-  - 0.06
-  - 0.04
-  - 0.05
-  val:
-  - data/synthetic/val.jsonl
-  - data/clean_train/kept_public_val.jsonl
-  - data/clean_train/topics_val.jsonl
-  - data/clean_train/reading_val.jsonl
-  - data/clean_train/knowledge_val.jsonl
-  - data/clean_train/kept_injection_val.jsonl
-  - data/clean_train/injection_val.jsonl
-  - data/clean_train/ordinal_val.jsonl
-  - data/clean_train/injgen_val.jsonl
-  - data/clean_train/injgen2_val.jsonl
-  calib:
-  - data/synthetic/calib.jsonl
-  - data/clean_train/kept_public_calib.jsonl
-  - data/clean_train/topics_calib.jsonl
-  - data/clean_train/reading_calib.jsonl
-  - data/clean_train/knowledge_calib.jsonl
-  - data/clean_train/kept_knowledge_calib.jsonl
-  - data/clean_train/kept_injection_calib.jsonl
-  - data/clean_train/injection_calib.jsonl
-  - data/clean_train/harmful_calib.jsonl
-  - data/clean_train/ordinal_calib.jsonl
-  - data/clean_train/injgen_calib.jsonl
-  - data/clean_train/injgen2_calib.jsonl
+    - data/synthetic/train.jsonl                    # 0.14  programmatic synthetic tasks
+    - data/clean_train/kept_public_train.jsonl      # 0.15  clinc, massive, winogrande
+    - data/clean_train/topics_train.jsonl           # 0.08  LEDGAR, arXiv
+    - data/clean_train/reading_train.jsonl          # 0.10  CUAD, CSQA2, RuleTaker, HANS
+    - data/clean_train/knowledge_train.jsonl        # 0.06  CODAH, Balanced-COPA, AQuA-RAT, CaseHOLD
+    - data/clean_train/kept_knowledge_train.jsonl   # 0.06  QASC, CosmosQA, QuaRTz, StrategyQA
+    - data/clean_train/kept_injection_train.jsonl   # 0.02  Gandalf
+    - data/clean_train/injection_train.jsonl        # 0.08  TrustAIRLab, LLMail, OASST1 negatives
+    - data/clean_train/harmful_train.jsonl          # 0.02  XSTest, JBB-Behaviors
+    - data/clean_train/ordinal_train.jsonl          # 0.05  Civil Comments, OASST1 ratings
+    - data/clean_train/kept_context_train.jsonl     # 0.09  in-context items (clinc, massive)
+    - data/synthetic/uncertainty_train.jsonl        # 0.06  unknowable / buried states
+    - data/clean_train/injgen_train.jsonl           # 0.04  generated attacks, blunt
+    - data/clean_train/injgen2_train.jsonl          # 0.05  generated attacks, subtle
+  data_weights: [0.14, 0.15, 0.08, 0.10, 0.06, 0.06, 0.02, 0.08, 0.02, 0.05, 0.09, 0.06, 0.04, 0.05]
+  val: [data/synthetic/val.jsonl, data/clean_train/kept_public_val.jsonl, data/clean_train/topics_val.jsonl,
+        data/clean_train/reading_val.jsonl, data/clean_train/knowledge_val.jsonl, data/clean_train/kept_injection_val.jsonl,
+        data/clean_train/injection_val.jsonl, data/clean_train/ordinal_val.jsonl, data/clean_train/injgen_val.jsonl,
+        data/clean_train/injgen2_val.jsonl]
+  calib: [data/synthetic/calib.jsonl, data/clean_train/kept_public_calib.jsonl, data/clean_train/topics_calib.jsonl,
+          data/clean_train/reading_calib.jsonl, data/clean_train/knowledge_calib.jsonl,
+          data/clean_train/kept_knowledge_calib.jsonl, data/clean_train/kept_injection_calib.jsonl,
+          data/clean_train/injection_calib.jsonl, data/clean_train/harmful_calib.jsonl, data/clean_train/ordinal_calib.jsonl,
+          data/clean_train/injgen_calib.jsonl, data/clean_train/injgen2_calib.jsonl]
+  init_from: runs/x2b-clean3-stitch9b/model.pt   # warm start (never from a head trained on share-alike data)
   seed: 0
   max_steps: 1500
-  lr: 0.0001
+  lr: 1.0e-4
   warmup: 100
   states_per_step: 1
+  grad_accum: 2
   max_questions_per_state: 4
   max_state_tokens: 768
-  option_wrap_p: 0.3
-  consistency_weight: 0.5
   max_train_options: 16
   tokens_per_microbatch: 1000
-  backbone_weight_quant: null
+  option_wrap_p: 0.3
+  consistency_weight: 0.5
+  consistency_pairs: 1
+  consistency_options: 8
   none_p: 0.3
   none_drop_p: 0.25
+  backbone_weight_quant: null
+  materialize_weights: 3           # GB budget: expand only part of the 9B weights (memory)
+  max_oom_skips: 30                # skip (and log) up to 30 steps whose batch runs out of GPU memory
+  max_gpu_gb: 34
   eval_every: 250
   eval_states: 800
   save_every: 250
-  init_from: runs/x2b-clean-stitch9b/model.pt
-  grad_accum: 2
-  max_gpu_gb: 34
-  consistency_pairs: 1
-  consistency_options: 8
-  materialize_weights: 3
-  max_oom_skips: 30

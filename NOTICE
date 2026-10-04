@@ -3,10 +3,11 @@ Copyright 2026 Minerva Laboratories
 
 This product includes software developed at Minerva Laboratories.
 
-The checkpoint weights under checkpoints/ are released under the Apache License 2.0. They were trained on the
-datasets listed with their licenses in data/MANIFEST.md and in each checkpoint's model card (README.md), including
-CC-BY and CC-BY-SA datasets, whose authors are credited there.
-These checkpoints will be retrained without the CC-BY-SA datasets and re-released with clean provenance.
+The checkpoint weights under checkpoints/ are released under the Apache License 2.0. They were trained on the datasets
+listed with their licenses in data/MANIFEST.md and in each checkpoint's model card (README.md), whose authors are
+credited there. None of the training sources is share-alike, non-commercial, unlicensed or gated, and no training label
+was produced by a model. Part of the training data is prompt-injection attacks written by Qwen3.5-9B (Apache-2.0) into
+texts from those sources; their labels come from how each example was built.
 
 Backbone weights (Qwen3.5 and the quantized variants listed in each checkpoint's config.json) are not included; they
 are downloaded from their original repositories and keep their own licenses (Apache-2.0).

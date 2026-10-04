@@ -1,5 +1,8 @@
 # OpenDecider: detailed results
 
+> Current release (2026-10-03): clean-provenance checkpoints, §13–15. Sections 1–12 describe the earlier release
+> (trained with share-alike data) and the experiments that led to it; they are kept for the record.
+
 > Note (2026-09-30): the 2B→9B stitched rows in §2–4 were computed with the input embeddings standing in for the 9B's
 > untied LM head in the option log-prob feature. They are kept for the record. Corrected results on the 9B GGUF
 > weights are in §11 and in the README.
@@ -637,3 +640,163 @@ Median seconds; "warm" is the second run, after GemLite has tuned its kernels fo
 - Bug found while measuring: CUDA-graph capture advanced the static attention layers' write counter, so replays wrote
   keys three positions late and long sampled outputs overran the cache. Fixed before these runs (the counter is now
   restored with the recurrent states; unit test in `tests/test_explain.py`).
+
+## 13. Clean-provenance release (2026-10-03)
+
+### 13.1 Models
+
+| Name | What it is |
+|---|---|
+| OpenDecider 2B (`runs/x2b-clean3`, `checkpoints/opendecider-2b`) | V3 branched model on frozen Qwen3.5-2B (int8), VeRA on every layer (state and option rows), DepthAttn layer combine, 25.4M trainable parameters. Trained from scratch for 1,250 steps of 4 states on the clean corpus (`data/MANIFEST.md`), on the deployed int8 features, with the `none` option supervised (30% of questions get it; a quarter of those lose the gold option) and CE + Brier. Temperatures per type from the calibration split: choice 1.02, yes/no 0.96, score 3.64; conformal scores stored (choice 406, yes/no 393, score 84). Config: `configs/train_2b_clean.yaml`. |
+| OpenDecider 9B (`runs/x9b-clean3`, `checkpoints/opendecider-9b`) | The 2B's trunk and heads moved to frozen Qwen3.5-9B (Q4_0 GGUF, int8 on the GPU) with a ridge map from 9B layers 8/16/24/final (λ = 1, held-out cosine 0.88, 300 clean training states), then trained 1,500 steps of 2 states with VeRA on the top 16 layers, option rows only (58.1M trainable parameters). 27 steps (1.8%) were skipped because their batch ran out of GPU memory. Temperatures: choice 1.50, yes/no 1.22, score 1.52. Config: `configs/train_9b_clean.yaml`. |
+
+The corpus went through three versions; v1 → v2 adds the blunt generated injection set, v2 → v3 the subtle one (§14).
+
+### 13.2 Benchmarks with real labels
+
+Zero-shot. Accuracy [95% CI] / NLL.
+
+| Model | Banking77 8-way | Prompt injections | OpenBookQA | CommonsenseQA | PubMedQA |
+|---|---|---|---|---|---|
+| OpenDecider 9B (released) | 0.875 [0.825, 0.925] / 0.77 | 0.810 [0.741, 0.871] / 0.54 | 0.884 [0.856, 0.910] / 0.36 | 0.800 [0.775, 0.826] / 0.67 | 0.891 [0.871, 0.911] / 0.29 |
+| Clean 2B v3 stitched to 9B (warm start, no 9B training) | 0.881 [0.831, 0.925] / 0.48 | 0.784 [0.707, 0.853] / 0.44 | 0.844 [0.810, 0.874] / 0.60 | 0.782 [0.755, 0.808] / 0.67 | 0.893 [0.873, 0.913] / 0.29 |
+| OpenDecider 2B (released, v3) | 0.831 [0.775, 0.887] / 0.63 | 0.681 [0.595, 0.767] / 0.82 | 0.670 [0.628, 0.710] / 0.87 | 0.651 [0.621, 0.679] / 0.90 | 0.845 [0.821, 0.867] / 0.37 |
+| Clean 2B v2 | 0.838 [0.781, 0.894] / 0.63 | 0.664 [0.578, 0.750] / 1.00 | 0.672 [0.634, 0.716] / 0.85 | 0.660 [0.632, 0.689] / 0.90 | 0.838 [0.813, 0.862] / 0.39 |
+| Clean 2B v1 | 0.825 [0.762, 0.881] / 0.54 | 0.603 [0.509, 0.690] / 1.00 | 0.672 [0.632, 0.714] / 0.83 | 0.643 [0.612, 0.673] / 0.91 | 0.848 [0.825, 0.872] / 0.37 |
+| Previous release: 2B→9B stitched | 0.869 [0.812, 0.919] / 0.56 | 0.750 [0.672, 0.828] / 0.58 | 0.850 [0.818, 0.878] / 0.46 | 0.785 [0.758, 0.809] / 0.61 | 0.898 [0.879, 0.918] / 0.26 |
+| Qwen3.5-9B letter scores | 0.931 [0.887, 0.969] / 0.24 | 0.819 [0.750, 0.888] / 0.40 | 0.894 [0.866, 0.920] / 0.32 | 0.813 [0.787, 0.837] / 0.58 | 0.883 [0.863, 0.903] / 0.28 |
+
+- Training the 9B (vs the stitched warm start) gains 4.0 points on OpenBookQA, 2.6 on prompt injections and 1.8 on
+  CommonsenseQA; Banking77 and PubMedQA stay within noise. It also makes the 9B sharper: NLL on Banking77 rises from
+  0.48 to 0.77.
+- Against the previous release (trained with share-alike data), the released 9B is higher on OpenBookQA, prompt
+  injections and CommonsenseQA and within noise on the other two.
+- Third-party Jev numbers and their sources are in "Sources for numbers not measured here" below.
+
+### 13.3 typed-decisions (secondary)
+
+Gold labels are a ~4B teacher model's answers, so these numbers measure agreement with that teacher (§3).
+
+| Model | Accuracy | KL | Brier |
+|---|---|---|---|
+| OpenDecider 9B | 0.614 [0.592, 0.638] | 0.407 | 0.200 |
+| Clean 2B v3 stitched (no 9B training) | 0.565 [0.542, 0.590] | 0.278 | 0.154 |
+| OpenDecider 2B | 0.485 [0.460, 0.510] | 0.342 | 0.188 |
+| Previous release: 2B→9B stitched | 0.643 [0.620, 0.670] | 0.240 | 0.135 |
+| Qwen3.5-9B letter scores | 0.573 [0.548, 0.601] | 0.899 | 0.344 |
+
+### 13.4 `none` option and conformal sets
+
+`eval/none_eval.py`: 150 items per public benchmark (116 for prompt injections), each asked as written
+(answerable), with the correct option removed, with only the two most plausible wrong options left (hard), and about
+the state of an item from another benchmark (unrelated). AUROC of P(none) against the answerable questions [95% CI]:
+
+| Model | Correct option removed | Hard | Unrelated state |
+|---|---|---|---|
+| OpenDecider 9B | 0.893 [0.87, 0.91] | 0.880 [0.86, 0.90] | 0.808 [0.79, 0.83] |
+| OpenDecider 2B | 0.817 [0.79, 0.84] | 0.803 [0.78, 0.83] | 0.816 [0.79, 0.84] |
+| Previous release: 2B (no `none` training) | 0.716 [0.68, 0.74] | 0.760 [0.73, 0.79] | 0.854 [0.84, 0.87] |
+| Previous release: 2B→9B stitched | 0.893 [0.88, 0.91] | 0.917 [0.90, 0.93] | 0.741 [0.71, 0.77] |
+
+Conformal sets (LAC, α = 0.1) on the answerable questions, with the calibration scores stored in the 2B checkpoint
+(training-family calibration split, a different distribution): coverage 0.947, mean set size 2.07, 61% of answers
+abstain (set size ≠ 1). Refit on the first 50 labelled items of each benchmark and evaluated on the rest, coverage is
+0.82 to 0.94 per benchmark (about 100 test items each, so ±0.06 sampling noise).
+
+OpenDecider 9B, same protocol: coverage 0.962 on the answerable questions, mean set size 1.47, 35% abstain; it
+abstains on 72% of the questions with the correct option removed, 70% of the hard ones and 93% of those about an
+unrelated state. Refit per benchmark on 50 labels: coverage 0.84 to 0.95.
+
+### 13.5 Overlap between training data and benchmarks
+
+`eval/overlap_audit.py` (`runs/overlap_audit.json`) compares every string in the training, validation and calibration
+files of both release configs (163,817 records, including the generated injection sets) with every benchmark item:
+
+| Check | Result |
+|---|---|
+| Exact match (normalised, 20+ characters, our shared question templates excluded) | 10 records, all short answer options shared by QASC and OpenBookQA (e.g. "the digestive system"); no question or text |
+| Shared 13-word span | none |
+| Shared 8-word span | 28 records: PubMed abstract boilerplate ("the university of texas m. d. anderson cancer"), common banking phrases ("when i tried to use it to pay"), one science stem ("which of the following can be used to") |
+| Word overlap ≥ 0.4, prompt injections (116 items) | 6 items. Two related variants: `pi-0` ("act as an interviewer"; an adapted version is in our validation split, labelled benign there) and `pi-15` (a Gandalf attack with the same "ignore the above … initial instructions" pattern, training split, same label). Four are short sentences overlapping by chance |
+| Word overlap ≥ 0.4, Banking77 8-way (160 items) | 59 items have a CLINC or MASSIVE request with the same intent in other words (e.g. "I believe my credit card was stolen." / "my credit card was stolen") |
+
+Banking77 is held out as a dataset, not as a domain: CLINC and MASSIVE cover the same banking intents, so Banking77
+measures new wording of familiar intents. The audit cannot see indirect influence: the injection data was generated,
+and the release checkpoints chosen, after looking at these benchmarks (README, "How we measure, and why").
+
+### 13.6 Memory and latency
+
+Re-measurement on the new checkpoints is in progress (`scripts/bench_quant.py`). The previous release, with the same
+architecture and backbones, is in §9 and §12.
+
+## 14. Prompt-injection detection: generated attacks and calibration
+
+The clean corpus (§13) drops the injection sets whose texts were written by an LLM or whose upstream sources are
+share-alike, gated or undocumented (`data/MANIFEST.md`). The first clean 2B then missed most of the direct injections
+in deepset/prompt-injections. Two sets of attacks generated inside real texts (`data/builders/injection_gen.py`,
+labels by construction, `data/MANIFEST.md`) were added: `injgen` (blunt, v2) and `injgen2` (hard to notice, v3).
+
+deepset/prompt-injections test split (116 texts, 60 injections), zero-shot, accuracy with 95% CIs:
+
+| Model | Training data | Accuracy | AUROC | Injections caught | False alarms |
+|---|---|---|---|---|---|
+| Clean 2B v1 | clean corpus | 0.603 [0.509, 0.690] | 0.813 | 15/60 | 1/56 |
+| Clean 2B v2 | + `injgen` | 0.664 [0.578, 0.750] | 0.832 | 22/60 | 1/56 |
+| Clean 2B v3 | + `injgen2` | 0.681 [0.595, 0.767] | 0.835 | 24/60 | 1/56 |
+| Clean 2B v1, stitched to 9B | clean corpus | 0.664 [0.578, 0.750] | 0.952 | 22/60 | 1/56 |
+| Clean 2B v2, stitched to 9B | + `injgen` | 0.767 [0.690, 0.836] | 0.954 | 34/60 | 1/56 |
+| Clean 2B v3, stitched to 9B | + `injgen2` | 0.784 [0.707, 0.853] | 0.953 | 36/60 | 1/56 |
+| Same, stitch fitted on the bf16 9B weights (int8 at load) | + `injgen2` | 0.819 [0.750, 0.888] | 0.963 | 40/60 | 1/56 |
+| Previous release: 2B→9B stitched | earlier corpus | 0.750 [0.672, 0.828] | 0.946 | 32/60 | 1/56 |
+
+- The models rank injections well (AUROC 0.95–0.96 on the 9B backbone) but are conservative: the mild, direct
+  injections of this benchmark get P(injection) around 0.3–0.5, below the 0.5 threshold. Each generated set moves
+  more of them over it. False alarms stay at 1 in 56.
+- AUROC hardly changes between v1 and v3 on the 9B: the generated data mostly shifts confidence, not ranking.
+
+Few-label calibration (fitted, not zero-shot): `eval/calib_curve.py` fits a calibrator on n labelled texts from one half
+of the benchmark and scores the other half, then swaps halves (5 seeds). Accuracy:
+
+| Labels | Clean 2B v2: temperature | Clean 2B v2: isotonic | Clean 2B v1 stitched: temperature | Clean 2B v1 stitched: isotonic |
+|---|---|---|---|---|
+| 0 | 0.664 | 0.664 | 0.664 | 0.664 |
+| 10 | 0.664 | 0.709 | 0.664 | 0.764 |
+| 25 | 0.664 | 0.740 | 0.664 | 0.836 |
+| 50 | 0.664 | 0.724 | 0.664 | 0.852 |
+
+Temperature scaling cannot change accuracy here (it keeps the 0.5 threshold on a two-way question); it lowers the log
+loss (2B: 1.00 → 0.61 with 25 labels). Isotonic regression moves the threshold. Callers get the same with
+`POST /v1/calibrate` and `method: "auto"`. These numbers use labels from the benchmark itself, so they are not
+comparable with zero-shot results.
+
+## 15. Training speed on the Orin
+
+`scripts/profile_train.py` (torch.profiler, CPU side) and `tegrastats` (GPU busy fraction; the profiler's CUDA
+tracing does not work on this Jetson). Clean 2B config, int8 backbone.
+
+| Setting | s per state | GPU busy |
+|---|---|---|
+| Before: 1 state per pass, int8 weights dequantized on every call, per-micro-batch GPU syncs | 4.1 | low (CPU-bound, ~85% of step time in dispatch) |
+| After: 4 states per pass, int8-rounded weights expanded to bf16 once, VeRA projections cast once, one sync per step | 2.5 | ~84% |
+
+- Expanding the int8 weights once gives bit-identical outputs and gradients (`tests/test_materialize.py`); the
+  per-call path built the same product on every forward, recompute and backward call.
+- GemLite's fused int8 kernel is slower than bf16 cuBLAS at training batch sizes on this GPU (§12.2) and has no backward
+  pass, so it is used for inference only.
+- The 9B trains with row-only VeRA on the top 16 layers (`v3_vera_scope: rows_top`): with adapters on every layer, the
+  backward pass through the 768-token 9B state needed ~13 GB more than fits beside the OS. Rare oversized batches are
+  skipped and logged (`max_oom_skips`); the released 9B skipped about 1.7% of its steps.
+- Checkpoints store the optimizer, schedule and random-number states, so a stopped run resumes exactly
+  (`train.resume=true`, `tests/test_train.py`).
+
+## Sources for numbers not measured here
+
+Retrieved 2026-09-23. All are reported by their authors or by third parties and were not reproduced.
+
+| Claim | Source | Setup differences from ours |
+|---|---|---|
+| Jev 1.13: Banking77 8-way 0.838, 77-way 0.788; prompt-injection detection 0.870 (AUROC 0.990) | AY Automate, https://www.ayautomate.com/blog/jev-vs-llm-benchmark | 8-way: 160 items, 20 per intent (same size as ours). Injection: 400 deepset texts (170 injections + 230 benign), not only the 116-text test split |
+| Jev: OpenBookQA 0.942, CommonsenseQA 0.881 | scienthoon, https://github.com/scienthoon/jev-ood-calibration | OpenBookQA validation (500), CommonsenseQA validation (1,221); ours: OpenBookQA test (500), 1,000 CommonsenseQA validation items |
+| Jev: Banking77 77-way 0.790 | Towards Data Science, https://towardsdatascience.com/a-new-kind-of-model-for-ai-decision-making/ | not evaluated here |
+| typed-decisions leaderboard (Decider 1 0.768, Jev 1.13 0.727, Featherless Simple Jev 0.716) and the 0.704 / 0.735 ceilings | dataset card, https://huggingface.co/datasets/LocalLLaMA/typed-decisions | same test split (400 cases, 2,000 decisions) |
+| Jev latency 70–500 ms, input-token pricing, RLCD training | TypeSafe launch post, https://typesafe.ai/blog/introducing-system-one-models-and-jev, and docs, https://docs.typesafe.ai | measured by TypeSafe near its servers, network included; ours is on-device on a Jetson AGX Orin |
