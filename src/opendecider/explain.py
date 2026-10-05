@@ -108,15 +108,14 @@ class Explainer:
         h = self.__dict__.get("_head")
         if h is None:
             bb = self.bb
-            W, sc = bb._head_rows()
             if bb.device.type != "cuda":
                 h = bb.head_logits
             else:
                 from .quant import gemlite_linear
-                lin = torch.nn.Linear(W.shape[1], W.shape[0], bias=False, device=bb.device, dtype=torch.bfloat16)
-                for a in range(0, W.shape[0], 32768):          # dequantize in chunks into the bf16 staging copy
-                    lin.weight.data[a:a + 32768] = (W[a:a + 32768].to(torch.bfloat16) *
-                                                    (sc[a:a + 32768].to(torch.bfloat16) if sc is not None else 1))
+                V, d = bb.head_size(), bb.hidden_size
+                lin = torch.nn.Linear(d, V, bias=False, device=bb.device, dtype=torch.bfloat16)
+                for a in range(0, V, 32768):                    # dequantize in chunks into the bf16 staging copy
+                    lin.weight.data[a:a + 32768] = bb.head_rows(slice(a, a + 32768))
                 g = gemlite_linear(lin, 8)
                 del lin
                 torch.cuda.empty_cache()

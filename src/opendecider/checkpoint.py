@@ -22,9 +22,10 @@ def save(model, path: str, extra: dict | None = None) -> None:
     os.replace(tmp, path)
 
 
-def load_model(path: str, backbone: Backbone | None = None, device: str | None = None):
+def load_model(path: str, backbone: Backbone | None = None, device: str | None = None, overrides: dict | None = None):
+    """overrides: BackboneConfig fields to change for this load (e.g. {"table_quant": "q4"})."""
     ck = torch.load(path, map_location="cpu", weights_only=False)
-    bcfg = BackboneConfig(**ck["backbone_cfg"])
+    bcfg = BackboneConfig(**{**ck["backbone_cfg"], **(overrides or {})})
     if device:
         bcfg.device = device
     bb = backbone or Backbone.load(bcfg)

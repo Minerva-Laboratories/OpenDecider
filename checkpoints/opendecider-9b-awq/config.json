@@ -1849,7 +1849,8 @@
    "source": {
     "repo_id": "cyankiwi/Qwen3.5-9B-AWQ-4bit",
     "revision": "156edc4bbeb8d1910ee7be9196bafaf1bc052156"
-   }
+   },
+   "table_quant": "q4"
   }
  },
  "default_backbone": "awq",

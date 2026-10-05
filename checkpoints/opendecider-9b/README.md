@@ -49,17 +49,18 @@ split; for other distributions, refit with a few dozen labels (`POST /v1/calibra
 
 ## Backbone variants
 
-Jetson AGX Orin 64 GB, int8 KV cache, eager kernels, one fresh process per variant for memory and latency.
+Jetson AGX Orin 64 GB, int8 KV cache, serving path (question cache, tuned fused int8 kernels), Q4_0 embedding table and LM head, Orin in 50 W mode; one fresh process per variant for
+memory and latency.
 Accuracy: 500 typed-decisions questions (secondary) / Banking77 8-way / prompt-injection detection. The head was
 trained on the default variant's features.
 
 | Variant | Backbone source | Weights on GPU | Peak GPU memory, 0.8k / 15k-token state | Latency, same states | Accuracy |
 |---|---|---|---|---|---|
-| `gguf-q4_0` (default) | unsloth/Qwen3.5-9B-MTP-GGUF | 8.62 GB | 9.9 / 11.1 GB | 3.68 / 21.35 s | 0.560 / 0.875 / 0.810 |
+| `gguf-q4_0` (default) | unsloth/Qwen3.5-9B-MTP-GGUF | 7.79 GB | 8.8 / 10.2 GB | 2.56 / 19.12 s | 0.560 / 0.875 / 0.810 |
 
 ## Requirements
 
-CUDA GPU with about 10 GB free for states up to 1k tokens (11 GB at 15k). Disk: 5.6 GB for the GGUF backbone.
+CUDA GPU with about 9 GB free for states up to 1k tokens (10.2 GB at 15k). Disk: 5.6 GB for the GGUF backbone.
 
 OpenDecider is a public hypothesis test of a "System One" decision model in the style of TypeSafe's Jev. Results
 are reported only as consistent or inconsistent with public observations; nothing here describes how Jev is built.

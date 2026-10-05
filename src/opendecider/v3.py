@@ -264,7 +264,7 @@ class V3(DecisionModel):
         finally:
             vera.active = False
 
-    def _rows_forward(self, ids, mask, rows, pc, smask, position_ids=None):
+    def _rows_forward(self, ids, mask, rows, pc, smask, position_ids=None, prefix=None):
         """One chunk of rows continuing from their states' caches -> wide features. With `v3_row_checkpoint` and a
         graph being built, the chunk is recomputed in backward: the function unpacks a FRESH cache and switches VeRA
         on itself, so the recompute sees the same inputs and adapters as the forward (peak = state graph + 1 chunk)."""
@@ -277,7 +277,11 @@ class V3(DecisionModel):
             if vera is not None:
                 vera.active = True
             try:
-                with shared_prefix_attention(bb, pc, rows, smask) if shared else contextlib.nullcontext():
+                # prefix: two-level question-cache prefix (state cache + each question's own K/V, see qcache)
+                attn = shared_prefix_attention(bb, prefix["pc"], rows, smask, q_kv=prefix["q_kv"],
+                                               q_state=prefix["q_state"]) if prefix else \
+                    shared_prefix_attention(bb, pc, rows, smask) if shared else contextlib.nullcontext()
+                with attn:
                     f, _ = bb(ids, mask, layers=bb.cfg.feature_layers,
                               past_key_values=pc.unpack_rows(rows, attn_placeholder=shared),
                               use_cache=True, past_mask=smask.index_select(0, rows), position_ids=position_ids)
@@ -472,14 +476,25 @@ class V3(DecisionModel):
                 sg = sidx[gi].to(dev)
                 Lg = int(lq[gi].max())
                 gmask = qmask[gi, :Lg].to(dev)
-                cache = pc.unpack_rows(sg)
+                shared = self.cfg.v3_shared_prefix and not grad
+                cache = pc.unpack_rows(sg, attn_placeholder=shared)
                 padded = bool((lq[gi] < Lg).any())
-                with bb.padded_continuation(gmask, cache) if padded else contextlib.nullcontext():
+                cap = {} if shared else None
+                # shared: questions attend to ONE copy of the state K/V and keep only their own K/V (captured)
+                attn = shared_prefix_attention(bb, pc, sg, smask, capture=cap) if shared else contextlib.nullcontext()
+                with attn, bb.padded_continuation(gmask, cache) if padded else contextlib.nullcontext():
                     fq, cache = bb(Qids[gi, :Lg].to(dev), gmask, layers=bb.cfg.feature_layers, past_key_values=cache,
                                    use_cache=True, past_mask=smask.index_select(0, sg))
                 Q[gi.to(dev), :Lg] = self._wide(fq).to(fdt)
                 pcq = PackedCache.pack(cache, kv_int8=(not grad) and kv_mode(bb.cfg),
-                                       state_int8=bb.cfg.quantize_linear_state and not grad)
+                                       state_int8=bb.cfg.quantize_linear_state and not grad, kv=not shared)
+                prefix = None
+                if shared:
+                    for li, (k_, _) in cap.items():           # placeholders: rows read K/V through `prefix`
+                        shape = (len(gi), k_.shape[1], smask.shape[1] + Lg, k_.shape[3])
+                        for a in ("keys", "values"):
+                            pcq.tensors[(li, a, None)] = torch.zeros((), dtype=k_.dtype, device=dev).expand(shape)
+                    prefix = {"pc": pc, "q_kv": cap, "q_state": sg}
                 pmq = torch.cat([smask.index_select(0, sg), gmask], 1)
                 ng = n_opt[gi]
                 local = torch.repeat_interleave(torch.arange(len(gi)), ng)                 # question-in-group per row
@@ -494,7 +509,7 @@ class V3(DecisionModel):
                     w = max(2, int(lo[rows[sl]].max()))
                     pos = None if pos0 is None else (pos0[sl, None] + torch.arange(w)).to(dev)
                     F[rows[sl].to(dev), :w] = self._rows_forward(O[rows[sl], :w].to(dev), omask[rows[sl], :w].to(dev),
-                                                                 local[sl].to(dev), pcq, pmq, pos).to(fdt)
+                                                                 local[sl].to(dev), pcq, pmq, pos, prefix).to(fdt)
             qm, om = qmask.to(dev), omask.to(dev)
             q_flat, o_flat = Q[qm], F[om]
             if self.cfg.v3_lm_feature:

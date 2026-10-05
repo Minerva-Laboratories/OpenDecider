@@ -6,7 +6,8 @@ Each config is "weights:cache[:graphs]": weights int8 | nf4 (bitsandbytes) | w8 
 nearest) | awq (pre-quantized AWQ checkpoint on GemLite int4 kernels, configs/*_awq.yaml), cache
 int8 | int4, ":graphs" = CUDA-graph engine (src/opendecider/deploy.py), ":qcache" = question-cache row path
 (exact; question tokens computed once per question instead of once per option), ":serving" = the serving path
-load_decider installs (decider.prepare_inference_: question cache + tuned int8 kernels). Embeddings stay int8
+load_decider installs (decider.prepare_inference_: question cache + tuned int8 kernels), ":q4t" = embedding table
+and LM head as Q4_0 blocks, ":pf<N>" = state pass in slices of N tokens. Embeddings stay int8 otherwise
 (every cached K/V and the state memory; GDN recurrent state stays bf16/fp32). Per config:
   memory  : GPU memory after load, and peak during one decide() for states of about 0.9k / 3.9k / 15k tokens
   latency : decide() wall time for the same states (prefix cache off; median of 3 after a warm-up call per size)
@@ -88,6 +89,11 @@ def main():
             graphs, qcache, serving = "graphs" in mode, "qcache" in mode, "serving" in mode
             torch.cuda.empty_cache(); torch.cuda.reset_peak_memory_stats()
             over = {"weight_quant": w, "kv_quant": kv}
+            if "q4t" in mode:               # embedding table and LM head as Q4_0 blocks instead of int8
+                over["table_quant"] = "q4"
+            pf = [int(m_[2:]) for m_ in mode if m_.startswith("pf")]
+            if pf:                          # state pass in slices of this many tokens
+                over["prefill_chunk"] = pf[0]
             if w == "awq" and ck["backbone_cfg"].get("weight_quant") != "awq":   # checkpoint not already on AWQ:
                 # use the pre-quantized AWQ checkpoint for this backbone (configs/*_awq.yaml)
                 import yaml

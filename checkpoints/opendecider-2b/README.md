@@ -49,7 +49,8 @@ split; for other distributions, refit with a few dozen labels (`POST /v1/calibra
 
 ## Backbone variants
 
-Jetson AGX Orin 64 GB, int8 KV cache, eager kernels, one fresh process per variant for memory and latency.
+Jetson AGX Orin 64 GB, int8 KV cache, eager kernels; one fresh process per variant for
+memory and latency.
 Accuracy: 500 typed-decisions questions (secondary) / Banking77 8-way / prompt-injection detection. The head was
 trained on the default variant's features.
 

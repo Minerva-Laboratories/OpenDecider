@@ -16,9 +16,8 @@ import torch
 import torch.nn as nn
 import yaml
 
-from .quant import (Int8Embedding, Int8Linear, Int8Tensor, gemlite_a8w8_, gemlite_quantize_, kv_mode, materialize,
-                    maybe_quantize,
-                    quantize_int8_)
+from .quant import (Int8Tensor, gemlite_a8w8_, gemlite_quantize_, kv_mode, materialize, maybe_quantize, quantize_int8_,
+                    quantize_table)
 
 
 @dataclass
@@ -29,6 +28,7 @@ class BackboneConfig:
     dtype: str = "bfloat16"
     weight_quant: str = "int8"          # none | int8 | nf4 (bitsandbytes) | w4 | w8 | a8w8 | awq4 (GemLite Triton GEMMs)
     kv_quant: str = "int8"              # none | int8 | int4  (all cached K/V and state memory)
+    table_quant: str = "int8"           # embedding table and LM head when weights are quantized: int8 | q4 (Q4_0 blocks)
     quantize_linear_state: bool = False  # GDN recurrent/conv state (not a KV cache)
     feature_layers: list = field(default_factory=lambda: ["final"])  # "final" = post-norm last layer, or ints 1..L
     awq_path: str = ""                  # weight_quant=awq4: calibrated scales (scripts/awq_calibrate.py)
@@ -86,13 +86,13 @@ class Backbone(nn.Module):
         from .ct_load import is_compressed_tensors
         if is_compressed_tensors(cfg.path):                   # pre-quantized AWQ (llm-compressor, see ct_load.py)
             from .ct_load import load_qwen35_ct
-            lm, head = load_qwen35_ct(cfg.path, cfg.device, dtype)
+            lm, head = load_qwen35_ct(cfg.path, cfg.device, dtype, cfg.table_quant)
             return cls(lm, AutoTokenizer.from_pretrained(cfg.path), cfg, head)
         if cfg.path.endswith(".gguf"):                        # llama.cpp quantized weights (see gguf_load.py)
             from .gguf_load import load_qwen35_gguf
             d = os.path.dirname(cfg.path)
             awq = torch.load(cfg.awq_path, weights_only=False)["params"] if cfg.weight_quant == "awq4" else None
-            lm, head = load_qwen35_gguf(cfg.path, d, cfg.device, dtype, cfg.weight_quant, awq)
+            lm, head = load_qwen35_gguf(cfg.path, d, cfg.device, dtype, cfg.weight_quant, awq, cfg.table_quant)
             return cls(lm, AutoTokenizer.from_pretrained(d), cfg, head)
         src, rev = (cfg.path, None) if os.path.isdir(cfg.path) else (cfg.repo_id, cfg.revision)
         tok = AutoTokenizer.from_pretrained(src, revision=rev)
@@ -100,7 +100,7 @@ class Backbone(nn.Module):
         lm = full.model
         head = None
         if not getattr(full.config, "tie_word_embeddings", True):   # untied (9B): keep the real LM head
-            head = Int8Linear(full.lm_head) if cfg.weight_quant != "none" else full.lm_head
+            head = quantize_table(full.lm_head, cfg.table_quant) if cfg.weight_quant != "none" else full.lm_head
         del full.lm_head
         if cfg.weight_quant == "int8":
             quantize_int8_(lm.layers)
@@ -111,27 +111,33 @@ class Backbone(nn.Module):
         if cfg.weight_quant == "awq4":             # calibrated 4-bit (scripts/awq_calibrate.py -> cfg.awq_path)
             from .awq import apply_awq_
             apply_awq_(lm.layers, torch.load(cfg.awq_path, weights_only=False)["params"])
-        if cfg.weight_quant != "none":             # the embedding table is int8 in every quantized mode
-            lm.embed_tokens = Int8Embedding(lm.embed_tokens)
+        if cfg.weight_quant != "none":             # the embedding table is quantized in every quantized mode
+            lm.embed_tokens = quantize_table(lm.embed_tokens, cfg.table_quant)
             torch.cuda.empty_cache()
         return cls(lm, tok, cfg, head)
 
     # ------------------------------------------------------------------ LM head (log-prob features, explanations)
-    def _head_rows(self):
-        """(int8 rows, per-row scale) or (weight, None) of the LM head: lm_head if untied, else embed_tokens."""
-        m = self.lm_head if self.lm_head is not None else self.lm.embed_tokens
-        q = getattr(m, "qweight", None)
-        return (q, m.scale) if q is not None else (m.weight, None)
+    def _head_table(self):
+        """The LM head's rows: lm_head if untied, else embed_tokens (an int8 / Q4 table, or a float module)."""
+        return self.lm_head if self.lm_head is not None else self.lm.embed_tokens
+
+    def head_size(self) -> int:
+        t = self._head_table()
+        return t.num_embeddings if hasattr(t, "num_embeddings") else t.out_features
+
+    def head_rows(self, idx, dtype=torch.bfloat16) -> torch.Tensor:
+        """LM-head rows `idx` (index tensor or slice) in `dtype`, dequantized; never the whole table at once."""
+        t = self._head_table()
+        f = getattr(t, "dequant_rows", None)
+        return f(idx, dtype) if f is not None else t.weight[idx].to(dtype)
 
     @torch.no_grad()
     def head_logits(self, h: torch.Tensor, chunk: int = 32768) -> torch.Tensor:
-        """Full-vocabulary logits h @ Wᵀ, reading the (int8) head in chunks; no full-precision copy is kept."""
-        W, sc = self._head_rows()
+        """Full-vocabulary logits h @ Wᵀ, reading the (quantized) head in chunks; no full-precision copy is kept."""
         hb = h.to(torch.bfloat16)
         parts = []
-        for a in range(0, W.shape[0], chunk):
-            Wc = W[a:a + chunk].to(torch.bfloat16) * (sc[a:a + chunk].to(torch.bfloat16) if sc is not None else 1)
-            parts.append((hb @ Wc.t()).float())
+        for a in range(0, self.head_size(), chunk):
+            parts.append((hb @ self.head_rows(slice(a, a + chunk)).t()).float())
         return torch.cat(parts, -1)
 
     @torch.no_grad()
@@ -139,17 +145,16 @@ class Backbone(nn.Module):
                       max_block_bytes: int = 1 << 30) -> torch.Tensor:
         """log softmax(h @ Wᵀ)[tok], normaliser by chunked log-sum-exp. Never materializes n × vocab: vocabulary chunks
         are dequantized once, and rows are processed in blocks so each logits block stays under max_block_bytes."""
-        W, sc = self._head_rows()
         hb = h.to(torch.bfloat16)
         lse = torch.full((h.shape[0],), -float("inf"), device=h.device)
-        rows_per_block = max(1, max_block_bytes // (4 * min(chunk, W.shape[0])))
-        for a in range(0, W.shape[0], chunk):
-            Wc = W[a:a + chunk].to(torch.bfloat16) * (sc[a:a + chunk].to(torch.bfloat16) if sc is not None else 1)
+        V = self.head_size()
+        rows_per_block = max(1, max_block_bytes // (4 * min(chunk, V)))
+        for a in range(0, V, chunk):
+            Wc = self.head_rows(slice(a, a + chunk))
             for r in range(0, h.shape[0], rows_per_block):
                 blk = slice(r, r + rows_per_block)
                 lse[blk] = torch.logaddexp(lse[blk], torch.logsumexp((hb[blk] @ Wc.t()).float(), dim=-1))
-        rows = W[tok].float() * (sc[tok].float() if sc is not None else 1)
-        return (h.float() * rows).sum(-1) - lse
+        return (h.float() * self.head_rows(tok, torch.float32)).sum(-1) - lse
 
     # ------------------------------------------------------------------ tokenization
     def tokenize(self, texts: Sequence[str]) -> list[list[int]]:
@@ -170,8 +175,9 @@ class Backbone(nn.Module):
 
     @property
     def device(self):
-        return self.lm.embed_tokens.qweight.device if hasattr(self.lm.embed_tokens, "qweight") \
-            else self.lm.embed_tokens.weight.device
+        e = self.lm.embed_tokens                     # quantized tables keep buffers, float ones a parameter
+        t = next(e.buffers(), None)
+        return t.device if t is not None else e.weight.device
 
     @property
     def dtype(self):
@@ -380,7 +386,8 @@ class PackedCache:
         self.seq_len = seq_len
 
     @classmethod
-    def pack(cls, cache, kv_int8: bool = True, state_int8: bool = False) -> "PackedCache":
+    def pack(cls, cache, kv_int8: bool = True, state_int8: bool = False, kv: bool = True) -> "PackedCache":
+        """kv=False: keep only the GDN states (attention K/V held elsewhere, e.g. the question cache's capture)."""
         tensors = {}
         template = copy.copy(cache)
         template.layers = []
@@ -388,7 +395,7 @@ class PackedCache:
             shell = copy.copy(layer)
             for a in _KV_ATTRS:
                 t = getattr(layer, a, None)
-                if isinstance(t, torch.Tensor) and t.numel():
+                if kv and isinstance(t, torch.Tensor) and t.numel():
                     tensors[(li, a, None)] = maybe_quantize(t, kv_int8)
                     setattr(shell, a, None)
             for a in _STATE_ATTRS:

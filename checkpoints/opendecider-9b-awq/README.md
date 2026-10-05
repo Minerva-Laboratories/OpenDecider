@@ -49,17 +49,18 @@ split; for other distributions, refit with a few dozen labels (`POST /v1/calibra
 
 ## Backbone variants
 
-Jetson AGX Orin 64 GB, int8 KV cache, eager kernels, one fresh process per variant for memory and latency.
+Jetson AGX Orin 64 GB, int8 KV cache, serving path (question cache), Q4_0 embedding table and LM head, Orin in 50 W mode; one fresh process per variant for
+memory and latency.
 Accuracy: 500 typed-decisions questions (secondary) / Banking77 8-way / prompt-injection detection. The head was
 trained on the default variant's features.
 
 | Variant | Backbone source | Weights on GPU | Peak GPU memory, 0.8k / 15k-token state | Latency, same states | Accuracy |
 |---|---|---|---|---|---|
-| `awq` (default) | cyankiwi/Qwen3.5-9B-AWQ-4bit | 5.74 GB | 6.9 / 8.2 GB | 2.90 / 26.31 s | 0.526 / 0.881 / 0.793 |
+| `awq` (default) | cyankiwi/Qwen3.5-9B-AWQ-4bit | 4.91 GB | 5.9 / 7.3 GB | 2.55 / 25.84 s | 0.526 / 0.881 / 0.793 |
 
 ## Requirements
 
-CUDA GPU with about 7 GB free for states up to 1k tokens (8.2 GB at 15k). Disk: about 8.5 GB for the AWQ backbone.
+CUDA GPU with about 6 GB free for states up to 1k tokens (7.3 GB at 15k). Disk: about 8.5 GB for the AWQ backbone.
 
 OpenDecider is a public hypothesis test of a "System One" decision model in the style of TypeSafe's Jev. Results
 are reported only as consistent or inconsistent with public observations; nothing here describes how Jev is built.

@@ -15,7 +15,7 @@ import os
 import torch
 import torch.nn as nn
 
-from .quant import Int8Embedding, Int8Linear
+from .quant import quantize_table
 
 
 def unpack_int4(packed: torch.Tensor, K: int) -> torch.Tensor:
@@ -44,7 +44,7 @@ def dequant(packed, scale, shape) -> torch.Tensor:
 
 
 @torch.no_grad()
-def load_qwen35_ct(path: str, device: str = "cuda", dtype=torch.bfloat16):
+def load_qwen35_ct(path: str, device: str = "cuda", dtype=torch.bfloat16, table_quant: str = "int8"):
     """(text model with GemLite int4 linears, None) from a compressed-tensors checkpoint directory."""
     from safetensors import safe_open
     from transformers import AutoConfig
@@ -81,7 +81,7 @@ def load_qwen35_ct(path: str, device: str = "cuda", dtype=torch.bfloat16):
 
     lm.embed_tokens.to_empty(device=device)
     lm.embed_tokens.weight.copy_(get("embed_tokens.weight"))
-    lm.embed_tokens = Int8Embedding(lm.embed_tokens)
+    lm.embed_tokens = quantize_table(lm.embed_tokens, table_quant)
     for i, layer in enumerate(lm.layers):
         fill(layer, f"layers.{i}.")
     lm.norm.to_empty(device=device)
@@ -94,7 +94,7 @@ def load_qwen35_ct(path: str, device: str = "cuda", dtype=torch.bfloat16):
         w = where[name].get_tensor(name)
         lin = nn.Linear(w.shape[1], w.shape[0], bias=False, device=device, dtype=dtype)
         lin.weight.copy_(w.to(device=device, dtype=dtype))
-        head = Int8Linear(lin)
+        head = quantize_table(lin, table_quant)
         del lin, w
     return lm.eval(), head
 

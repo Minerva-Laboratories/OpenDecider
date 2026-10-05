@@ -16,7 +16,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from .quant import Int8Embedding, Int8Linear, gemlite_a8w8_, gemlite_quantize_, quantize_int8_
+from .quant import gemlite_a8w8_, gemlite_quantize_, quantize_int8_, quantize_table
 
 
 def _reorder_v_heads(t: torch.Tensor, dim: int, n_a: int, n_b: int, head: int) -> torch.Tensor:
@@ -95,7 +95,7 @@ def _convert(name: str, x: torch.Tensor, shape, c) -> torch.Tensor:
 
 @torch.no_grad()
 def load_qwen35_gguf(gguf_path: str, config_dir: str, device: str = "cuda", dtype=torch.bfloat16,
-                     weight_quant: str = "int8", awq_params: dict | None = None) -> nn.Module:
+                     weight_quant: str = "int8", awq_params: dict | None = None, table_quant: str = "int8") -> nn.Module:
     """(text model: embed_tokens, layers, norm; untied LM head or None) from a GGUF file."""
     import gguf
     from transformers import AutoConfig
@@ -117,8 +117,8 @@ def load_qwen35_gguf(gguf_path: str, config_dir: str, device: str = "cuda", dtyp
                 p.copy_(x.to(p.dtype))
 
     fill(lm.embed_tokens, "embed_tokens.")
-    if weight_quant != "none":
-        lm.embed_tokens = Int8Embedding(lm.embed_tokens)
+    if weight_quant != "none":                  # q4 reproduces a Q4_0 GGUF embedding exactly
+        lm.embed_tokens = quantize_table(lm.embed_tokens, table_quant)
     for i, layer in enumerate(lm.layers):                     # one layer in bf16 at a time
         fill(layer, f"layers.{i}.")
         if weight_quant == "int8":
@@ -142,6 +142,6 @@ def load_qwen35_gguf(gguf_path: str, config_dir: str, device: str = "cuda", dtyp
         head.weight = nn.Parameter(W.to(device=device, dtype=dtype), requires_grad=False)
         del W
         if weight_quant != "none":
-            head = Int8Linear(head)
+            head = quantize_table(head, table_quant)
         torch.cuda.empty_cache()
     return lm.eval(), head

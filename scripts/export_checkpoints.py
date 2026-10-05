@@ -34,24 +34,28 @@ RELEASES = [
      "requirements": "CUDA GPU with about 2.5 GB free for states up to 1k tokens (3.1 GB at 15k). The `int8` variant "
                      "also runs on CPU (slow). Disk: 4.3 GB for the backbone download."},
     {"name": "opendecider-9b", "title": "OpenDecider 9B", "base_model": QWEN9B["repo_id"], "run": "runs/x9b-clean3", "default": "gguf-q4_0",
-     "variants": {"gguf-q4_0": ("int8", GGUF9B)},
-     "bench": ("runs/quant/release_9b.json", "runs/quant/fresh/9b_{cfg}.json", {"gguf-q4_0": "int8:int8"}),
+     # embedding table and LM head as Q4_0 blocks: same benchmark accuracy, 0.83 GB less (docs/RESULTS.md §16)
+     "variants": {"gguf-q4_0": ("int8", GGUF9B, {"table_quant": "q4"})},
+     "bench": ("runs/quant/release_9b.json", "runs/quant/serving/9b_{cfg}_q4t.json", {"gguf-q4_0": "int8:int8"}),
+     "bench_note": "serving path (question cache, tuned fused int8 kernels), Q4_0 embedding table and LM head, Orin in "
+                   "50 W mode",
      "evals": "x9b-clean3",
      "summary": "The 2B checkpoint's trunk and heads moved to the 9B with a closed-form ridge map between the two backbones' "
                 "features, then trained for 1,500 steps on the same corpus with VeRA adapters on the top 16 layers "
                 "(58.1M trainable parameters).",
      "backbone_note": f"frozen Qwen3.5-9B, Q4_0 GGUF from {GGUF9B['repo_id']} (Apache-2.0)",
-     "requirements": "CUDA GPU with about 10 GB free for states up to 1k tokens (11 GB at 15k). Disk: 5.6 GB for the "
+     "requirements": "CUDA GPU with about 9 GB free for states up to 1k tokens (10.2 GB at 15k). Disk: 5.6 GB for the "
                      "GGUF backbone."},
     {"name": "opendecider-9b-awq", "title": "OpenDecider 9B AWQ (4-bit)", "base_model": QWEN9B["repo_id"], "run": "runs/x2b-clean3-stitch9b-awq",
-     "default": "awq", "variants": {"awq": ("awq", AWQ9B)},
-     "bench": ("runs/quant/9b_clean3_awq.json", "runs/quant/fresh/9b_awq_{cfg}.json", {"awq": "awq:int8"}),
+     "default": "awq", "variants": {"awq": ("awq", AWQ9B, {"table_quant": "q4"})},
+     "bench": ("runs/quant/9b_clean3_awq.json", "runs/quant/serving/9b_awq_{cfg}_q4t.json", {"awq": "awq:int8"}),
+     "bench_note": "serving path (question cache), Q4_0 embedding table and LM head, Orin in 50 W mode",
      "evals": "x2b-clean3-stitch9b-awq",
      "summary": "The 2B checkpoint's trunk and heads moved to the 4-bit AWQ 9B with a closed-form ridge map fitted on the "
                 "AWQ backbone's own features (no gradient steps on the 9B). About 3 GB less GPU memory than "
                 "opendecider-9b and faster on short states, 1 to 2 points lower on knowledge-heavy multiple choice.",
      "backbone_note": f"frozen Qwen3.5-9B, AWQ int4 from {AWQ9B['repo_id']} (Apache-2.0)",
-     "requirements": "CUDA GPU with about 7 GB free for states up to 1k tokens (8.2 GB at 15k). Disk: about 8.5 GB for "
+     "requirements": "CUDA GPU with about 6 GB free for states up to 1k tokens (7.3 GB at 15k). Disk: about 8.5 GB for "
                      "the AWQ backbone."},
 ]
 
@@ -152,7 +156,7 @@ def variants_table(rel):
         return ""
     acc = json.load(open(acc_path))
     rows = []
-    for name, (wq, src) in rel["variants"].items():
+    for name, (wq, src, *_) in rel["variants"].items():
         cfg = cfg_of[name]
         mem_path = mem_pat.format(cfg=cfg.replace(":", "_"))
         if cfg not in acc or not os.path.exists(mem_path):
@@ -163,7 +167,8 @@ def variants_table(rel):
                     f"{a['typed']['acc']:.3f} / {a['banking77_8way']:.3f} / {a['prompt_injections']:.3f} |")
     return f"""## Backbone variants
 
-Jetson AGX Orin 64 GB, int8 KV cache, eager kernels, one fresh process per variant for memory and latency.
+Jetson AGX Orin 64 GB, int8 KV cache, {rel.get("bench_note", "eager kernels")}; one fresh process per variant for
+memory and latency.
 Accuracy: 500 typed-decisions questions (secondary) / Banking77 8-way / prompt-injection detection. The head was
 trained on the default variant's features.
 
@@ -214,9 +219,11 @@ Or serve it: `python -m opendecider.serve --model checkpoints/{rel['name']}`.
 
 
 def variants(base_cfg, entries):
+    """entries: name -> (weight_quant, source[, extra BackboneConfig fields, e.g. {"table_quant": "q4"}])."""
     keep = ("dtype", "kv_quant", "quantize_linear_state", "feature_layers")
-    return {name: {**{k: base_cfg[k] for k in keep if k in base_cfg}, "weight_quant": wq, "source": src}
-            for name, (wq, src) in entries.items()}
+    return {name: {**{k: base_cfg[k] for k in keep if k in base_cfg}, "weight_quant": e[0], "source": e[1],
+                   **(e[2] if len(e) > 2 else {})}
+            for name, e in entries.items()}
 
 
 def main():

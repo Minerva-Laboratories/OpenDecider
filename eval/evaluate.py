@@ -41,11 +41,11 @@ def gpu_context(device: str, tag: str = "eval"):
 
 
 def load_scorer(ckpt: str | None, baseline: str | None, backbone_config: str | None = None,
-                device: str = "cuda", backbone=None):
+                device: str = "cuda", backbone=None, overrides: dict | None = None):
     """Returns (model_with_encode_states_and_run, checkpoint_temperature)."""
     if ckpt:
         from opendecider.checkpoint import load_model
-        model, extra = load_model(ckpt, backbone=backbone, device=device)
+        model, extra = load_model(ckpt, backbone=backbone, device=device, overrides=overrides)
         return model, float(extra.get("temperature", 1.0))
     from opendecider.backbone import Backbone, BackboneConfig
     from .baselines import build_baseline
@@ -189,6 +189,7 @@ def main(argv=None):
     ap.add_argument("--limit", type=int, default=0, help="max records per file (debug)")
     ap.add_argument("--save-preds", action="store_true")
     ap.add_argument("--out-root", default="runs")
+    ap.add_argument("--table-quant", choices=["int8", "q4"], help="embedding table / LM head format (default: as saved)")
     ap.add_argument("--serving", action="store_true",
                     help="evaluate the serving path (decider.prepare_inference_: question cache, tuned int8 kernels)")
     a = ap.parse_args(argv)
@@ -205,7 +206,8 @@ def main(argv=None):
 
     t0 = time.perf_counter()
     with gpu_context(a.device, "eval"):
-        model, ckpt_T = load_scorer(a.ckpt, a.baseline, a.backbone_config, a.device)
+        model, ckpt_T = load_scorer(a.ckpt, a.baseline, a.backbone_config, a.device,
+                                    overrides={"table_quant": a.table_quant} if a.table_quant else None)
         if a.serving and a.ckpt:
             from opendecider.decider import prepare_inference_
             prepare_inference_(model)

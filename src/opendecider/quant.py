@@ -156,6 +156,10 @@ class Int8Linear(nn.Module):
         return F.linear(x, self.qweight.to(x.dtype) * self.scale.to(x.dtype),
                         None if self.bias is None else self.bias.to(x.dtype))
 
+    def dequant_rows(self, idx, dtype=torch.bfloat16) -> torch.Tensor:
+        """Weight rows `idx` (output units) in `dtype` (LM-head use: log-probs and logits in chunks)."""
+        return self.qweight[idx].to(dtype) * self.scale[idx].to(dtype)
+
     def extra_repr(self) -> str:
         return f"in={self.in_features}, out={self.out_features}, int8 weight-only"
 
@@ -194,6 +198,59 @@ class Int8Embedding(nn.Module):
 
     def forward(self, ids: torch.Tensor) -> torch.Tensor:
         return self.qweight[ids].to(self.scale.dtype) * self.scale[ids]
+
+    def dequant_rows(self, idx, dtype=torch.bfloat16) -> torch.Tensor:
+        return self.qweight[idx].to(dtype) * self.scale[idx].to(dtype)
+
+
+class Q4Table(nn.Module):
+    """Frozen 4-bit table (embedding rows or LM-head rows) in llama.cpp's Q4_0 layout: blocks of 32 values along a row,
+    one fp16 scale d per block, w = (q - 8) * d with q in 0..15 (low nibbles hold block positions 0-15, high nibbles
+    16-31). 4.5 bits per value. Quantizing values that came from a Q4_0 GGUF tensor reproduces them exactly (the block
+    extreme is -8 d, so d is recovered); other tables get round-to-nearest Q4_0."""
+
+    def __init__(self, w: torch.Tensor):
+        super().__init__()
+        N, K = w.shape
+        assert K % 32 == 0, "Q4Table needs rows whose length is a multiple of 32"
+        self.num_embeddings, self.embedding_dim = N, K
+        self.in_features, self.out_features = K, N
+        self.padding_idx = None
+        qs, ds = [], []
+        for a in range(0, N, 16384):                        # chunks: bounded float32 temporaries
+            b = w[a:a + 16384].float().view(-1, K // 32, 32)
+            idx = b.abs().argmax(-1, keepdim=True)
+            mx = b.gather(-1, idx)                          # signed value of largest magnitude (ggml's choice)
+            d = mx / -8
+            inv = torch.where(d != 0, 1 / d, torch.zeros_like(d))
+            q = torch.clamp(torch.floor(b * inv + 8.5), 0, 15).to(torch.uint8)
+            qs.append((q[..., :16] | (q[..., 16:] << 4)).view(b.shape[0], K // 2))
+            ds.append(d.squeeze(-1).to(torch.float16))
+        self.register_buffer("qs", torch.cat(qs))
+        self.register_buffer("d", torch.cat(ds))
+
+    def dequant_rows(self, idx, dtype=torch.bfloat16) -> torch.Tensor:
+        """Rows `idx` (index tensor or slice) as (n, K) in `dtype`."""
+        q = self.qs[idx]
+        n, K = q.shape[0], self.embedding_dim
+        q = q.view(n, K // 32, 16)
+        v = torch.cat([q & 15, q >> 4], -1).to(dtype) - 8               # (n, blocks, 32)
+        return (v * self.d[idx].to(dtype).unsqueeze(-1)).view(n, K)
+
+    @property
+    def weight(self) -> torch.Tensor:
+        return self.dequant_rows(slice(None), torch.float16 if self.d.device.type == "cpu" else torch.bfloat16)
+
+    def forward(self, ids: torch.Tensor) -> torch.Tensor:              # embedding lookup
+        return self.dequant_rows(ids.reshape(-1), torch.bfloat16 if ids.is_cuda else torch.float32).view(
+            *ids.shape, self.embedding_dim)
+
+
+def quantize_table(module: nn.Module, mode: str) -> nn.Module:
+    """An embedding or LM-head module as the frozen table `mode` (int8 | q4); `module` holds float weights."""
+    if mode == "q4":
+        return Q4Table(module.weight.data)
+    return Int8Embedding(module) if isinstance(module, nn.Embedding) else Int8Linear(module)
 
 
 def quantize_int8_(module: nn.Module, skip: tuple[str, ...] = ()) -> nn.Module:

@@ -48,7 +48,15 @@ def _forward(mod, ctx, hidden_states, position_embeddings, attention_mask=None, 
     v = mod.v_proj(hidden_states).view(R, t, -1, D).transpose(1, 2)
     cos, sin = position_embeddings
     q, k = apply_rotary_pos_emb(q, k, cos, sin)
+    if ctx.get("capture") is not None:                    # this pass's own keys/values, for continuations after it
+        ctx["capture"][mod.layer_idx] = (k, v)
     Kp, Vp = ctx["kv"][mod.layer_idx]                                          # (S, Hkv, T, D), one per state
+    if ctx.get("q_kv") is not None:
+        # two-level prefix: state K/V (shared) + each question's own K/V, joined for this layer only
+        Kq, Vq = ctx["q_kv"][mod.layer_idx]
+        qs = ctx["q_state"]
+        Kp, Vp = torch.cat([Kp.index_select(0, qs), Kq.to(Kp.dtype)], 2), torch.cat([Vp.index_select(0, qs),
+                                                                                     Vq.to(Vp.dtype)], 2)
     Hkv, g = k.shape[1], q.shape[1] // k.shape[1]
     T = Kp.shape[2]
     dev = q.device
@@ -107,11 +115,16 @@ def _forward(mod, ctx, hidden_states, position_embeddings, attention_mask=None, 
 
 
 @contextlib.contextmanager
-def shared_prefix_attention(bb, pc, rows: torch.Tensor, pmask: torch.Tensor, static: bool = False):
+def shared_prefix_attention(bb, pc, rows: torch.Tensor, pmask: torch.Tensor, static: bool = False,
+                            capture: dict | None = None, q_kv: dict | None = None, q_state: torch.Tensor | None = None):
     """While active, full-attention layers attend to pc's per-state K/V (dequantized once) for rows `rows`
     (row i reads state rows[i]); pmask (S, T) marks real prefix tokens. static=True (CUDA graphs): shapes stay fixed,
     prefix pads are masked instead of sliced, and nothing is read back to the host. Otherwise leading pads are sliced
-    off and any later pads (a right-padded question pass, see V3._branched_feats_qcache) are masked."""
+    off and any later pads (a right-padded question pass, see V3._branched_feats_qcache) are masked.
+    capture: dict filled with each attention layer's (k, v) of this pass (the question pass of the question cache).
+    q_kv / q_state: a second prefix level. Then `rows` index QUESTIONS, question j's prefix is state q_state[j]'s K/V
+    followed by q_kv[layer][j], and pmask (questions, T + Lq) covers both; the join is made one layer at a time, so
+    the state's K/V is never copied per question for all layers at once."""
     kv = {}
     for li, _ in _attn_modules(bb):
         K = materialize(pc.tensors[(li, "keys", None)]).to(bb.dtype)
@@ -126,13 +139,15 @@ def shared_prefix_attention(bb, pc, rows: torch.Tensor, pmask: torch.Tensor, sta
         pad = pm.int().argmax(1).tolist()                                     # leading pads (left-padded states)
         holes = ((~pm).sum(1).cpu() > torch.tensor(pad)).tolist()              # pads after the first real key
     ctx = {"kv": kv, "pad": pad, "holes": holes, "pmask": pmask.bool(), "states": states,
-           "rows_of": rows_of, "static": static,
+           "rows_of": rows_of, "static": static, "capture": capture, "q_kv": q_kv,
+           "q_state": None if q_state is None else q_state.to(pmask.device),
            "rows_of_max": max(int(v.numel()) for v in rows_of.values())}
     if not static and kv and len(states) > 1:
         # several states (e.g. one per question with the question cache): one batched call per layer when the
         # gathered per-row prefix K/V stays small, instead of one call per state
         K0 = next(iter(kv.values()))[0]
-        if rows.numel() * K0[0].numel() * K0.element_size() * 4 <= BATCHED_BYTES:
+        per_row = K0[0].numel() // K0.shape[2] * pmask.shape[1]                # one row's prefix, both levels
+        if rows.numel() * per_row * K0.element_size() * 4 <= BATCHED_BYTES:
             ctx["row_state"], ctx["bmask"] = rows.to(K0.device), {}
     mods = _attn_modules(bb)
     for _, m in mods:
