@@ -65,7 +65,7 @@ state + { route: choice[billing, technical, refund, other], urgent: noul, severi
 
 Zero-shot: no data from these benchmarks was used for training, tuning or data generation (see
 [How we measure, and why](#how-we-measure-and-why) for what that does and does not rule out). Brackets are 95%
-bootstrap intervals (1,000 resamples). Full tables: [`docs/RESULTS.md`](docs/RESULTS.md) §13–15.
+bootstrap intervals (1,000 resamples). Full tables: [`docs/RESULTS.md`](docs/RESULTS.md) §13–17.
 
 ### Benchmarks with real labels
 
@@ -89,18 +89,25 @@ bootstrap intervals (1,000 resamples). Full tables: [`docs/RESULTS.md`](docs/RES
   [jev-ood-calibration](https://github.com/scienthoon/jev-ood-calibration): OpenBookQA and CommonsenseQA validation
   splits. Retrieved 2026-09-23. Our results are consistent with Jev being ahead on knowledge-heavy multiple choice and
   injection detection, and behind on Banking77.
+- Banking77: 17 of the 9B's 20 errors are one intent, "get physical card", whose messages in Banking77 are mostly about
+  the card PIN; a zero-shot model sees only the label name. Qwen's letter scores get 15 of those 20 right. That one
+  intent is more than the whole gap between the two (12 vs 9 messages): on the other seven intents the 9B is slightly
+  ahead, 137 vs 134 of 140 (`docs/RESULTS.md` §17.3).
 - Prompt-injection detection is a classification task: the model labels each text as an injection attempt or a
   normal request. It does not measure whether the model itself resists instructions injected into a state.
 
 ### Prompt-injection detection
 
-| | Injections caught | False alarms | AUROC |
-|---|---|---|---|
-| OpenDecider 9B | 39 / 60 | 1 / 56 | 0.957 |
-| OpenDecider 2B | 24 / 60 | 1 / 56 | 0.835 |
+| | Injections caught (recall) | False alarms | Precision | F1 | MCC | ROC-AUC | PR-AUC |
+|---|---|---|---|---|---|---|---|
+| OpenDecider 9B | 39 / 60 | 1 / 56 | 0.97 | 0.78 | 0.66 | 0.96 | 0.96 |
+| OpenDecider 9B AWQ | 38 / 60 | 2 / 56 | 0.95 | 0.76 | 0.63 | 0.95 | 0.95 |
+| OpenDecider 2B | 24 / 60 | 1 / 56 | 0.96 | 0.56 | 0.46 | 0.84 | 0.87 |
+| Qwen3.5-9B, letter scores | 41 / 60 | 2 / 56 | 0.95 | 0.80 | 0.67 | 0.97 | 0.97 |
 
-The models rank injections well but are conservative: the mild injections in this benchmark get probabilities around
-0.3 to 0.5. With 25 to 50 labelled examples, isotonic calibration (`POST /v1/calibrate`) moves the threshold; on the
+At P(injection) >= 0.5 on deepset's 116 test inputs; intervals, curves and the other benchmarks are in
+`docs/RESULTS.md` §17. The models rank injections well but are conservative: the mild injections in this benchmark get
+probabilities around 0.3 to 0.5. With 25 to 50 labelled examples, isotonic calibration (`POST /v1/calibrate`) moves the threshold; on the
 stitched 9B this raised accuracy to 0.84 to 0.85. That is a fitted result, measured on halves of the benchmark itself,
 and is reported separately in `docs/RESULTS.md` §14.
 
@@ -112,6 +119,7 @@ most plausible wrong options left, or about an unrelated state. AUROC of P(none)
 | | Correct option removed | Only plausible wrong options | Unrelated state |
 |---|---|---|---|
 | OpenDecider 9B | 0.893 [0.87, 0.91] | 0.880 [0.86, 0.90] | 0.808 [0.79, 0.83] |
+| OpenDecider 9B AWQ (4-bit) | 0.892 [0.87, 0.91] | 0.909 [0.89, 0.92] | 0.710 [0.68, 0.74] |
 | OpenDecider 2B | 0.817 [0.79, 0.84] | 0.803 [0.78, 0.83] | 0.816 [0.79, 0.84] |
 | Previous 2B release (no `none` training) | 0.716 [0.68, 0.74] | 0.760 [0.73, 0.79] | 0.854 [0.84, 0.87] |
 
@@ -140,16 +148,35 @@ One fresh process per configuration, eager kernels. Accuracy on 500 typed-decisi
 | 2B, NF4 / int8 | 1.26 GB | 1.8 / 1.9 / 2.5 GB | 0.83 / 1.73 / 5.84 s | 0.384 / 0.775 / 0.638 |
 | 9B, int8 / int8 (default; Q4_0 GGUF download, int8 on the GPU) | 8.62 GB | 9.9 / 10.0 / 11.1 GB | 3.68 / 7.52 / 21.4 s | 0.560 / 0.875 / 0.810 |
 | 9B, int8 / int4 | 8.62 GB | 9.9 / 10.0 / 11.1 GB | 3.70 / 7.55 / 21.4 s | 0.546 / 0.881 / 0.793 |
-| 9B stitched head on AWQ int4 / int4 (not released) | 5.74 GB | 6.9 / 7.0 / 8.2 GB | 2.93 / 7.20 / 26.4 s | 0.526 / 0.887 / 0.819 |
+| 9B AWQ (`opendecider-9b-awq`), int4 / int4 | 5.74 GB | 6.9 / 7.0 / 8.2 GB | 2.93 / 7.20 / 26.4 s | 0.526 / 0.887 / 0.819 |
 
 - The heads were trained on int8 backbone features. On the 2B, 4-bit weights cost a few points on some sets and gain
   on others; NF4 is the weakest.
-- A 9B in 4 bits works when the head is fitted to it: the stitch refit on the AWQ weights matches the int8 stitched
-  model on the public benchmarks (`docs/RESULTS.md` §13.6). The released 9B, trained on int8 features, has not been
-  retrained on 4-bit ones yet.
+- A 9B in 4 bits works when the head is fitted to it: `opendecider-9b-awq` is the 2B head stitched onto the AWQ
+  weights (no 9B training). It matches the int8 stitched model on the public benchmarks (`docs/RESULTS.md` §13.6),
+  is 1 to 2 points below the trained 9B on knowledge-heavy multiple choice, and weaker at flagging questions about
+  an unrelated state (`none` AUROC 0.71 vs 0.81).
 - A 4-bit KV cache halves the stored state (281 → 179 MB on the 9B at 15k tokens) but not the peak: the backbone has
   only 6 attention layers with 2 KV heads.
 - Option rows share one copy of the state's keys and values through fused SDPA (scores never materialized).
+
+**Serving path** (what `load_decider` runs since 2026-10-04): the question cache above a per-model number of option rows,
+one padded pass for all questions, and fused int8 kernels tuned for the GPU (`scripts/tune_kernels.py`). Measured
+the same day in fresh processes, in the Orin's 50 W mode (GPU clock capped at 816 MHz; the older table above may have
+been measured in MAXN), against the previous path:
+
+| Request | 2B | 9B | 9B AWQ |
+|---|---|---|---|
+| 3 questions, 0.8k-token state | 1.03 → 0.89 s | 3.66 → 2.49 s | 2.89 → 2.45 s |
+| 3 questions, 3.7k-token state | 1.92 → 1.92 s | 7.49 → 6.53 s | 7.17 → 6.93 s |
+| 3 questions, 15k-token state | 6.03 → 5.92 s | 21.4 → 19.7 s | 26.4 → 26.7 s |
+| 16 questions × up to 32 options, 0.9k-token state | 5.64 → 2.58 s | 21.6 → 5.77 s | 20.6 → 5.70 s |
+| Peak GPU memory, 15k-token state | 3.1 → 3.1 GB | 11.1 → 13.3 GB | 8.2 → 10.0 GB |
+
+Accuracy on the five benchmarks is unchanged within noise (12 of 2,666 answers change on the 9B, 28 on the 2B, all
+near ties; `docs/RESULTS.md` §16). The 9B's longer states cost more memory because the question pass copies the state
+cache once per question. On another GPU, run `scripts/tune_kernels.py --ckpt <checkpoint>` once; without it the int8
+layers keep the previous kernels.
 
 ### typed-decisions (secondary: agreement with a teacher model)
 
@@ -211,6 +238,13 @@ measurement, so we state our rules and where we fall short of them.
   scored poorly on deepset, made the second set subtler because deepset's injections are mild, and chose the released
   checkpoints by comparing versions on these same benchmarks. No benchmark text was used, but these decisions make our
   numbers on them somewhat optimistic.
+- **More than accuracy.** Decision-model results are increasingly reported as a single accuracy, F1 or AUC, which hides
+  how a model errs. For each task we give the measures that apply to it: confusion matrices, precision, recall,
+  specificity, F1 and MCC at a fixed threshold, ROC and precision-recall curves for detection, per-class results for
+  intents, a position analysis for multiple choice (where F1 and ROC do not apply), reliability diagrams and
+  risk-coverage curves (`docs/RESULTS.md` §17). They show, for example, that the injection detector errs by missing
+  attacks, not by false alarms, and that most of the 9B's Banking77 errors are one intent whose label name does not
+  describe its messages.
 - **Intervals, splits and code.** We give 95% bootstrap intervals, the exact splits, the code behind every number, and
   a source for every number we did not measure (`docs/RESULTS.md`, "Sources for numbers not measured here").
 - **Fitted is not zero-shot.** Calibration with labels and decision profiles are useful, and we show them, labelled as
@@ -251,7 +285,7 @@ Design notes: [`docs/roadmap_designs.md`](docs/roadmap_designs.md),
 | | Minimum | Tested |
 |---|---|---|
 | GPU memory, 2B | 2.4 GB for states up to about 1k tokens, 3.1 GB up to 15k (int8 weights); 1.8 / 2.5 GB with 4-bit weights | Jetson AGX Orin 64 GB |
-| GPU memory, 9B | 9.9 GB for states up to about 1k tokens, 11.1 GB up to 15k (int8 weights) | Jetson AGX Orin 64 GB |
+| GPU memory, 9B | 9.9 GB for states up to about 1k tokens, 13.3 GB up to 15k (int8 weights, serving path) | Jetson AGX Orin 64 GB |
 | Host RAM | 12 GB peak while loading the 2B backbone | same |
 | Disk | 2B: 4.3 GB backbone + 0.1 GB checkpoint; 9B: 5.2 GB Q4_0 GGUF + 0.1 GB checkpoint; Python environment about 6 GB | same |
 | Python | 3.12 | 3.12 on aarch64 (JetPack) |
@@ -296,18 +330,20 @@ Both checkpoints are in this repository under `checkpoints/` (fp16 safetensors, 
 contain only what was trained; the frozen backbone is downloaded from its original repository at a pinned revision.
 Each folder has a model card (`README.md`) with results, backbone variants and data licenses.
 
-| Checkpoint | Trained part | Backbone variants (`backbone=`) |
-|---|---|---|
-| `checkpoints/opendecider-2b` | 25.4M parameters, 50 MB | `int8` (default), `w8`, `nf4`, `awq` |
-| `checkpoints/opendecider-9b` | 58.1M parameters, 112 MB | `gguf-q4_0` (default) |
+| Checkpoint | What it is | Trained part | Backbone variants (`backbone=`) |
+|---|---|---|---|
+| `checkpoints/opendecider-2b` | 2B, trained | 25.4M parameters, 50 MB | `int8` (default), `w8`, `nf4`, `awq` |
+| `checkpoints/opendecider-9b` | 9B, stitched from the 2B then trained; most accurate | 58.1M parameters, 112 MB | `gguf-q4_0` (default; int8 on the GPU) |
+| `checkpoints/opendecider-9b-awq` | 9B in 4 bits, stitched from the 2B (no 9B training); 3 GB less GPU memory | 57.3M parameters, 109 MB | `awq` |
 
-The heads were trained on the default variants' features; the 4-bit 2B variants (`awq`, `nf4`) work but were not
+The heads were trained on their default variants' features; the 4-bit 2B variants (`awq`, `nf4`) work but were not
 trained on. The previous checkpoints (trained with share-alike data, including `opendecider-9b-stitched`) are in the
 git history before this release.
 
 ```python
 from opendecider.hub import load_decider
-dec = load_decider("checkpoints/opendecider-9b")                       # Q4_0 GGUF backbone
+dec = load_decider("checkpoints/opendecider-9b")                       # Q4_0 GGUF backbone, int8 on the GPU
+dec = load_decider("checkpoints/opendecider-9b-awq")                   # AWQ int4 backbone
 dec = load_decider("checkpoints/opendecider-2b", backbone="awq", kv_quant="int4")
 ```
 
@@ -369,9 +405,11 @@ Environment variables:
   average at α = 0.1). Refit them on your labels.
 - 4-bit backbone variants (`awq`, `nf4`) were not trained on; their features differ from the int8 ones the head saw.
   The released 9B has no 4-bit variant yet (a stitched 4-bit head works; see Memory and latency).
-- Latency on the Orin is about 1 s per request (2B) and 3.7 s (9B) for states up to about 1k tokens, and grows with
-  state length (6 s and 21 s at 15k tokens).
-  The passes are compute-bound: CUDA graphs were measured and made it slower (`docs/RESULTS.md` §12).
+- Latency on the Orin (50 W mode) is about 0.9 s per request (2B) and 2.5 s (9B) for states up to about 1k tokens
+  and a few questions, 2.6 s and 5.8 s for 16 questions with up to 32 options, and grows with state length (5.9 s and
+  19.7 s at 15k tokens). TypeSafe reports 70 to 500 ms for Jev
+  ([launch post](https://typesafe.ai/blog/introducing-system-one-models-and-jev)), measured by TypeSafe near its own
+  servers on hardware it has not disclosed; ours is on one edge device, so the two are not directly comparable.
 - Explanations take about 8 s (2B) and 25 s (9B) on the Orin and can contain small factual slips.
 - The prefix cache matches the uncached path to within 0.007 to 0.026 in probability (int8 cache boundaries), not
   bit-exactly.
@@ -383,7 +421,7 @@ Environment variables:
 |---|---|
 | Explanation quality and prefix-cache equivalence on the new checkpoints | Planned. Current numbers are from the previous release. |
 | W8A8 without the accuracy loss (SmoothQuant-style calibration) | Planned. W8A8 was 2.5x faster on the 9B at 0.8k tokens but lost 5 to 6 points (`docs/RESULTS.md` §12). |
-| GPUs other than the Jetson AGX Orin | Planned. All memory and latency numbers are from one Orin 64 GB. |
+| GPUs other than the Jetson AGX Orin | Not measured. `scripts/tune_kernels.py` prepares the fused kernels on any CUDA GPU; all memory and latency numbers are from one Orin 64 GB. |
 | GPU tests in CI | Planned. Unit tests run on CPU with a tiny random model; one GPU test covers the fused attention path. |
 | Robustness to prompt injection inside a state (not detection) | Planned. |
 | Behavioral probe battery on Jev itself | Blocked on API access. |
@@ -400,7 +438,8 @@ Environment variables:
 - [x] Clean-provenance checkpoints (2B, 9B with warm-started training).
 - [ ] Consistency constraints across questions.
 - [ ] Faster explanations (shared-prefix evidence pass).
-- [ ] TensorRT for p50 < 150 ms on the Orin.
+- [x] Faster serving path: 3.7x on the 9B for many questions (question cache, fused int8 kernels).
+- [ ] TensorRT or CUDA graphs for the option rows (the Gated DeltaNet layers need custom plugins for TensorRT).
 
 ## Reproduce
 

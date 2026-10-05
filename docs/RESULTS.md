@@ -694,6 +694,7 @@ the state of an item from another benchmark (unrelated). AUROC of P(none) agains
 | Model | Correct option removed | Hard | Unrelated state |
 |---|---|---|---|
 | OpenDecider 9B | 0.893 [0.87, 0.91] | 0.880 [0.86, 0.90] | 0.808 [0.79, 0.83] |
+| OpenDecider 9B AWQ (4-bit) | 0.892 [0.87, 0.91] | 0.909 [0.89, 0.92] | 0.710 [0.68, 0.74] |
 | OpenDecider 2B | 0.817 [0.79, 0.84] | 0.803 [0.78, 0.83] | 0.816 [0.79, 0.84] |
 | Previous release: 2B (no `none` training) | 0.716 [0.68, 0.74] | 0.760 [0.73, 0.79] | 0.854 [0.84, 0.87] |
 | Previous release: 2B→9B stitched | 0.893 [0.88, 0.91] | 0.917 [0.90, 0.93] | 0.741 [0.71, 0.77] |
@@ -741,7 +742,8 @@ the untied LM head is read from the checkpoint), compared with the stitch on the
 The 4-bit stitched model is as accurate as the int8 one with 2.9 GB less weight memory (5.74 vs 8.62 GB; peak 6.9 vs
 9.9 GB at 0.8k tokens). It is faster on short states (2.9 vs 3.7 s at 0.8k tokens) and slower on long ones (26.4 vs
 21.4 s at 15k), where GemLite's 4-bit kernels lose to cuBLAS at large batch sizes (§12.2). The released 9B was trained
-on int8 features; training it on the AWQ features is the way to a trained 4-bit 9B.
+on int8 features; training it on the AWQ features is the way to a trained 4-bit 9B. The 4-bit stitched model is released as
+`checkpoints/opendecider-9b-awq` (2026-10-04).
 
 ## 14. Prompt-injection detection: generated attacks and calibration
 
@@ -802,6 +804,214 @@ tracing does not work on this Jetson). Clean 2B config, int8 backbone.
   skipped and logged (`max_oom_skips`); the released 9B skipped about 1.7% of its steps.
 - Checkpoints store the optimizer, schedule and random-number states, so a stopped run resumes exactly
   (`train.resume=true`, `tests/test_train.py`).
+
+## 16. Serving-path latency (2026-10-04)
+
+All on the Jetson AGX Orin 64 GB in **MODE_50W** (`nvpmodel -q`; GPU clock capped at 816 MHz). §10 was measured in
+MAXN, so older and newer numbers are not directly comparable; the before/after pairs below were measured the same day,
+in fresh processes, in the same mode. "Before" is the path the released numbers were computed with; "after" is what
+`load_decider` now serves (`decider.prepare_inference_`).
+
+### 16.1 Many questions and options
+
+`scripts/profile_latency.py --events 25 --questions 16 --options 32` (a ~0.9k-token state, 16 questions, up to 32
+options each, 222 option rows; median of 5 after 2 warm-up calls).
+
+| Model | Before | After | Speed-up |
+|---|---|---|---|
+| OpenDecider 9B (int8 on the GPU) | 21.6 s | 5.77 s | 3.7x |
+| OpenDecider 9B AWQ (int4) | 20.6 s | 5.70 s | 3.6x |
+| OpenDecider 2B (int8) | 5.64 s | 2.58 s | 2.2x |
+
+Three questions (`scripts/bench_quant.py`, the configuration of §13.6; median of 3), before → after, and peak GPU
+memory at the longest state:
+
+| Model | 0.8k-token state | 3.7k | 15k | Peak at 15k |
+|---|---|---|---|---|
+| OpenDecider 9B | 3.66 → 2.49 s | 7.49 → 6.53 s | 21.4 → 19.7 s | 11.1 → 13.3 GB |
+| OpenDecider 9B AWQ | 2.89 → 2.45 s | 7.17 → 6.93 s | 26.4 → 26.7 s | 8.2 → 10.0 GB |
+| OpenDecider 2B | 1.03 → 0.89 s | 1.92 → 1.92 s | 6.03 → 5.92 s | 3.1 → 3.1 GB |
+
+The 9B's question cache copies the state cache once per question, which costs memory on long states. The AWQ 9B
+already ran on GemLite 4-bit kernels, so only the question-side changes apply to it.
+
+Accuracy on the five benchmarks of §13.2, released numbers vs the serving path (same command, `--serving`): unchanged
+within noise; 12 of 2,666 answers change on the 9B and 28 on the 2B, all near ties (largest single-item change in
+probability 0.185 on the 9B). The release check (`scripts/check_release.py`) passes on all three checkpoints.
+
+### 16.2 What changed
+
+The step-by-step times were measured during development in one process each; some were taken while the fused kernels
+were attached in a way that bypassed the 9B's VeRA adapters (fixed and covered by a test before anything was
+released; the adapters cost little time). They show where the time went; the totals in §16.1 are the final
+fresh-process measurements.
+
+| Change | Effect on the 9B request above | Same outputs? |
+|---|---|---|
+| Question cache on: each question and its option listing is read once, then every option row carries only its own tokens (it existed but was off, §12) | rows no longer repeat ~140 question tokens each | yes (tested, 1e-4) |
+| One right-padded pass for all questions instead of one pass per distinct question length. Pads leave the Gated DeltaNet state untouched (decay and write gate set to zero at pads, conv state re-gathered at each row's last real token); pad keys are masked and option rows get explicit positions | 19.1 → 10.6 s (dequantize kernels) | yes (tested, 1e-4; GPU 0.004 in probability) |
+| Fused int8 GEMMs (GemLite A16W8) reading the same int8 weights, tuned on this GPU; above a measured batch size per layer shape, the weight is expanded from the same buffer and cuBLAS is used | 10.6 → 6.4 s | same weights; up to 0.009 (9B) / 0.014 (2B) in probability from rounding (the fused kernel applies the scale in fp32 instead of rounding each weight to bf16 first) |
+| Conv input handed to the causal-conv1d kernel channels-last | 6.4 → 5.8 s (that kernel was 16 ms instead of 0.5 ms per call for 64 rows) | bit-identical |
+| Option rows sorted by length, each chunk only as wide as its longest option; all rows of a chunk in one attention call instead of one per question | fewer launches; no measurable change at this size | yes (tested) |
+
+Before the fused kernels, every int8 layer expanded its whole weight to bf16 on every call, so each of the ~16 backbone
+passes in a request paid for reading and writing ~25 GB; the GPU was busy at 99% doing it.
+
+The question cache only pays off with enough option rows: below that, its extra pass costs more than the repeated
+question tokens (`scripts/bench_qcache_rows.py`). Measured crossover: about 12 rows on the 9B, about 64 on the 2B; the
+serving path switches it on per call above these.
+
+| Option rows (questions x options) | 9B with / without | 2B with / without |
+|---|---|---|
+| ~4 (1 x 4) | 2.77 / 2.33 s | 1.41 / 0.96 s |
+| ~12 (3 x 4) | 2.75 / 3.00 s | 1.37 / 0.94 s |
+| ~64 (4 x 16) | 2.97 / 5.71 s | 1.35 / 1.66 s |
+| ~128 (8 x 16) | 3.89 / 7.74 s | 1.77 / 2.34 s |
+| ~222 (16 x 32) | 5.74 / 21.42 s | 2.56 / 5.90 s |
+
+Where the 9B request now spends its time: state pass 1.7 s (934 tokens), question pass 1.3 s, option rows ~2 s (four
+chunks of 64 rows, each about 0.5 s and no longer dependent on how many tokens a row has), head and bookkeeping ~0.8 s.
+
+### 16.3 Tried and not used
+
+- int8 activations as well (GemLite A8W8): 8.7 vs 9.6 s at the time, but it cost 5 to 6 points on the 9B in §12.
+- fla's fused recurrent kernel for 2 to 4-token rows instead of the chunked one: 0.84 → 0.80 s per row chunk, and it
+  produced NaN probabilities in this setting.
+- Larger row chunks: 128 rows per pass saved 0.12 s for +3.4 GB peak; 256 rows saved 0.3 s for +9.4 GB.
+
+### 16.4 Other GPUs
+
+`scripts/tune_kernels.py --ckpt <checkpoint>` tunes the fused kernels for whatever GPU it runs on (every layer shape
+of that checkpoint at each of GemLite's batch-size buckets; 8.5 min for the 9B here) and measures, per shape, from
+which batch size cuBLAS is faster. It writes `~/.cache/opendecider/kernels/gemlite_<gpu>_sm<cc>.json`, which
+`load_decider` picks up; without that file the int8 layers keep the dequantize path, because untuned GemLite is slower
+than it at large batches. No TensorRT engine was built: the backbone's Gated DeltaNet layers run on Triton kernels
+(fla, causal-conv1d) with a per-row recurrent state, which an ONNX → TensorRT export does not cover without custom
+plugins.
+
+## 17. Task-appropriate metrics beyond accuracy (2026-10-04)
+
+`eval/report_metrics.py` recomputes, from the saved per-item outputs of §13.2 (raw logits, temperature 1; no model
+was rerun), the metrics that mean something for each kind of task, each with a 95% bootstrap interval (1,000
+resamples of the items). The decision threshold is fixed at 0.5: choosing it on these items would fit the benchmark.
+Multiple-choice benchmarks get no F1 or ROC curves (answer positions are not classes); they get a position analysis
+instead. Third-party Jev numbers are accuracy only, so Jev cannot be compared on any of these. The metric functions are
+unit-tested on hand-computed cases and were cross-checked once against scikit-learn on 300 random cases with ties.
+
+### 17.1 Prompt-injection detection (116 inputs, 60 injections; positive = injection)
+
+| System | Precision | Recall | Specificity | F1 | MCC | ROC-AUC | PR-AUC |
+|---|---|---|---|---|---|---|---|
+| OpenDecider 9B | 0.975 [0.92, 1.00] | 0.650 [0.52, 0.76] | 0.982 [0.94, 1.00] | 0.780 [0.68, 0.86] | 0.665 [0.55, 0.77] | 0.957 [0.92, 0.99] | 0.959 [0.92, 0.99] |
+| OpenDecider 9B AWQ | 0.950 [0.88, 1.00] | 0.633 [0.50, 0.75] | 0.964 [0.91, 1.00] | 0.760 [0.65, 0.84] | 0.628 [0.50, 0.74] | 0.953 [0.92, 0.98] | 0.954 [0.91, 0.99] |
+| OpenDecider 2B | 0.960 [0.87, 1.00] | 0.400 [0.28, 0.52] | 0.982 [0.94, 1.00] | 0.565 [0.43, 0.68] | 0.464 [0.34, 0.58] | 0.835 [0.76, 0.91] | 0.871 [0.80, 0.94] |
+| Qwen3.5-9B letter scores | 0.953 [0.88, 1.00] | 0.683 [0.56, 0.80] | 0.964 [0.91, 1.00] | 0.796 [0.70, 0.87] | 0.670 [0.55, 0.78] | 0.968 [0.94, 0.99] | 0.968 [0.93, 1.00] |
+
+Confusion matrices at P(injection) >= 0.5:
+
+| System | TP | FN | FP | TN |
+|---|---|---|---|---|
+| OpenDecider 9B | 39 | 21 | 1 | 55 |
+| OpenDecider 9B AWQ | 38 | 22 | 2 | 54 |
+| OpenDecider 2B | 24 | 36 | 1 | 55 |
+| Qwen3.5-9B letter scores | 41 | 19 | 2 | 54 |
+
+![ROC and precision-recall curves](img/injection_roc_pr.png)
+
+- All four systems are precise and conservative at 0.5: one or two false alarms out of 56 clean inputs, but 19 to 36
+  of 60 injections missed. The ranking is good (ROC-AUC 0.95 to 0.97 for the 9B systems), so the threshold, not the
+  ordering, is what misses injections; the few-label calibration of §14 moves it.
+- Operating points at a fixed false-positive rate are not reported: with 56 clean inputs, 1% FPR allows no false
+  alarm and 5% allows two, and the intervals span most of [0, 1] (they are in `runs/metrics_report.json`).
+
+### 17.2 PubMedQA yes/no (890 questions; positive = yes)
+
+| System | Precision | Recall | Specificity | F1 | MCC | ROC-AUC |
+|---|---|---|---|---|---|---|
+| OpenDecider 9B | 0.898 [0.87, 0.92] | 0.929 [0.91, 0.95] | 0.828 [0.79, 0.87] | 0.914 [0.90, 0.93] | 0.767 [0.72, 0.81] | 0.956 [0.94, 0.97] |
+| OpenDecider 9B AWQ | 0.884 [0.86, 0.91] | 0.926 [0.90, 0.95] | 0.802 [0.76, 0.84] | 0.904 [0.89, 0.92] | 0.740 [0.70, 0.79] | 0.949 [0.93, 0.96] |
+| OpenDecider 2B | 0.858 [0.83, 0.88] | 0.899 [0.87, 0.92] | 0.757 [0.71, 0.80] | 0.878 [0.86, 0.90] | 0.667 [0.62, 0.72] | 0.909 [0.89, 0.93] |
+| Qwen3.5-9B letter scores | 0.919 [0.90, 0.94] | 0.889 [0.86, 0.91] | 0.873 [0.83, 0.90] | 0.904 [0.88, 0.92] | 0.755 [0.71, 0.80] | 0.951 [0.94, 0.96] |
+
+| System | TP | FN | FP | TN |
+|---|---|---|---|---|
+| OpenDecider 9B | 513 | 39 | 58 | 280 |
+| OpenDecider 9B AWQ | 511 | 41 | 67 | 271 |
+| OpenDecider 2B | 496 | 56 | 82 | 256 |
+| Qwen3.5-9B letter scores | 491 | 61 | 43 | 295 |
+
+The OpenDecider models lean towards "yes" (higher recall, lower specificity than Qwen's letter scores); MCC is the
+same within the intervals for the two 9B systems and Qwen.
+
+### 17.3 Banking77, 8 intents (160 messages, 20 per intent)
+
+| System | Accuracy | Macro-F1 | Balanced accuracy |
+|---|---|---|---|
+| OpenDecider 9B | 0.875 [0.82, 0.93] | 0.846 [0.80, 0.89] | 0.875 [0.85, 0.90] |
+| OpenDecider 9B AWQ | 0.881 [0.83, 0.93] | 0.859 [0.81, 0.90] | 0.881 [0.85, 0.91] |
+| OpenDecider 2B | 0.831 [0.78, 0.89] | 0.813 [0.76, 0.86] | 0.831 [0.79, 0.87] |
+| Qwen3.5-9B letter scores | 0.931 [0.89, 0.97] | 0.932 [0.89, 0.97] | 0.931 [0.89, 0.97] |
+
+![Banking77 confusion matrix, OpenDecider 9B](img/banking77_confusion_9b.png)
+
+17 of the 9B's 20 errors are one intent: "get physical card" is recognised in 3 of 20 messages (11 go to "lost or
+stolen card"). In Banking77 this label holds questions about the card PIN ("what is my card PIN", "I need my PIN"),
+which its name does not describe; a zero-shot model sees only the name. Recall on this intent: 9B 0.15, 9B AWQ 0.20,
+2B 0.20, Qwen letter scores 0.75. This one intent accounts for more than the whole accuracy gap to Qwen's letter
+scores on this benchmark (12 messages, against a total difference of 9): on the other seven intents the 9B is
+slightly ahead, 137 vs 134 of 140.
+
+### 17.4 Multiple choice: is there a position bias?
+
+OpenBookQA (500 questions, 4 options):
+
+| System | acc. when gold = A | acc. when gold = B | acc. when gold = C | acc. when gold = D | predicted share A/B/C/D |
+|---|---|---|---|---|---|
+| OpenDecider 9B | 0.92 | 0.90 | 0.84 | 0.88 | 0.28 / 0.26 / 0.26 / 0.21 |
+| OpenDecider 9B AWQ | 0.86 | 0.87 | 0.85 | 0.87 | 0.27 / 0.25 / 0.26 / 0.22 |
+| OpenDecider 2B | 0.69 | 0.73 | 0.63 | 0.62 | 0.28 / 0.27 / 0.25 / 0.20 |
+| Qwen3.5-9B letter scores | 0.87 | 0.90 | 0.92 | 0.89 | 0.25 / 0.26 / 0.27 / 0.21 |
+| (gold share) |  |  |  |  | 0.28 / 0.25 / 0.26 / 0.21 |
+
+CommonsenseQA (1,000 questions, 5 options):
+
+| System | acc. when gold = A | acc. when gold = B | acc. when gold = C | acc. when gold = D | acc. when gold = E | predicted share A/B/C/D/E |
+|---|---|---|---|---|---|---|
+| OpenDecider 9B | 0.78 | 0.81 | 0.78 | 0.80 | 0.84 | 0.20 / 0.21 / 0.20 / 0.19 / 0.20 |
+| OpenDecider 9B AWQ | 0.75 | 0.79 | 0.74 | 0.81 | 0.84 | 0.19 / 0.21 / 0.19 / 0.20 / 0.21 |
+| OpenDecider 2B | 0.68 | 0.64 | 0.62 | 0.64 | 0.68 | 0.20 / 0.20 / 0.20 / 0.19 / 0.21 |
+| Qwen3.5-9B letter scores | 0.81 | 0.81 | 0.81 | 0.81 | 0.83 | 0.19 / 0.20 / 0.21 / 0.20 / 0.20 |
+| (gold share) |  |  |  |  |  | 0.20 / 0.21 / 0.20 / 0.20 / 0.19 |
+
+No system prefers a position: the share of predictions per position follows the share of gold answers within about
+two points. This is about where answers are placed in these benchmarks, not about reordering the options of the same
+question; that is what the permutation probe measures (`eval/probes.py`, 20 orderings per item).
+
+### 17.5 Calibration and selective prediction
+
+![Expected calibration error per benchmark](img/calibration_ece.png)
+
+![Reliability diagrams](img/reliability.png)
+
+ECE uses 15 equal-mass bins, as everywhere in this repository; its bootstrap intervals are not centred on the
+estimate (ECE is biased upwards in small samples), and lower whiskers are clipped at the estimate in the bar chart. The
+reliability diagrams use 0.1-wide confidence bins for readability and omit bins with fewer than 5 answers. AURC is the
+mean error rate over all coverage levels when the least confident answers are dropped first (lower is better):
+
+| System | Injection | PubMedQA | Banking77 | OpenBookQA | CommonsenseQA |
+|---|---|---|---|---|---|
+| OpenDecider 9B | 0.075 [0.04, 0.12] | 0.027 [0.02, 0.04] | 0.028 [0.01, 0.05] | 0.024 [0.02, 0.04] | 0.074 [0.06, 0.09] |
+| OpenDecider 9B AWQ | 0.081 [0.04, 0.13] | 0.032 [0.02, 0.04] | 0.030 [0.01, 0.05] | 0.046 [0.03, 0.07] | 0.085 [0.07, 0.10] |
+| OpenDecider 2B | 0.217 [0.13, 0.32] | 0.063 [0.05, 0.08] | 0.072 [0.04, 0.11] | 0.169 [0.13, 0.21] | 0.175 [0.15, 0.20] |
+| Qwen3.5-9B letter scores | 0.061 [0.03, 0.10] | 0.033 [0.02, 0.04] | 0.011 [0.00, 0.02] | 0.021 [0.01, 0.03] | 0.066 [0.05, 0.08] |
+
+- These are raw probabilities (temperature 1, as in the headline tables). The served probabilities divide the logits
+  by each checkpoint's stored temperature per question type.
+- The 9B AWQ head is underconfident on multiple choice (its curve sits above the diagonal on OpenBookQA and
+  CommonsenseQA): it is the 2B head stitched onto 4-bit weights without retraining, and it carries the 2B's stored
+  temperatures (choice 1.02), which were not refitted on the 4-bit model. The trained 9B and Qwen's letter scores are
+  close to the diagonal.
+- Per-benchmark Brier, AURC and the reliability bins for every system are in `runs/metrics_report.json`.
 
 ## Sources for numbers not measured here
 
