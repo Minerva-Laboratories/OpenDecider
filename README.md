@@ -466,7 +466,7 @@ Environment variables:
 - [ ] Consistency constraints across questions.
 - [ ] Faster explanations (shared-prefix evidence pass).
 - [x] Faster serving path: 3.7x on the 9B for many questions (question cache, fused int8 kernels).
-- [ ] TensorRT or CUDA graphs for the option rows (the Gated DeltaNet layers need custom plugins for TensorRT).
+- [ ] CUDA graphs for the option rows. A TensorRT engine is not planned for now: none of the comparable open decision or guard models ships one for edge GPUs, and NVIDIA's edge runtime documents only text generation (`docs/LANDSCAPE.md` §1.5).
 
 ## Reproduce
 

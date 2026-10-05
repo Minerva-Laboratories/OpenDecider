@@ -150,6 +150,41 @@ Almost every open server that wants drop-in adoption now speaks the `/v1/systemo
 
 ---
 
+### 1.5 What comparable projects ship for deployment (checked 2026-10-04)
+
+From each project's README or model card (24 projects). "Community GGUF" means quantizations by others, linked from
+the Hugging Face page, not released by the authors.
+
+| Project | Weight formats | Runtimes | TensorRT or edge build | Latency claims |
+|---|---|---|---|---|
+| [Mapika/decider](https://github.com/Mapika/decider) | safetensors, own GGUF (Q4_K_M, Q8_0, BF16), NVFP4 | PyTorch (CUDA, MPS), MLX, CPU, llama.cpp, vLLM | no | 2B Q4 on 8 CPU threads 0.12–0.31 s |
+| [bespokelabsai/nimble](https://github.com/bespokelabsai/nimble) | full checkpoint or LoRA | PyTorch, MLX, SGLang | no | median 106 ms (H100) |
+| [jaredpalmer/kev](https://github.com/jaredpalmer/kev) | adapters (0.8–9B), full 27B | CUDA/ROCm, MLX | no | 18 ms (4B, H100) |
+| [NandhaKishorM/laya](https://github.com/NandhaKishorM/laya) | safetensors, ONNX | PyTorch, ONNX Runtime | no | 33 ms (T4) |
+| [Heman10x-NGU/Verdict-open-jev](https://github.com/Heman10x-NGU/Verdict-open-jev) | safetensors, ONNX | ONNX Runtime, browser (WebGPU/WASM) | browser only | p50 35.6 ms (WASM) |
+| [kerryrm/systemANE](https://github.com/kerryrm/systemANE) | Core ML | Apple Neural Engine | Apple only | 1.2 ms |
+| [caiovicentino/eikos](https://github.com/caiovicentino/eikos) | bf16, FP8, INT4, MLX | vLLM, PyTorch, MLX, SGLang | no | – |
+| [denis-pplx/autojev](https://github.com/denis-pplx/autojev), [featherless-ai/simple-jev](https://github.com/featherless-ai/simple-jev), [ekzhang/openjev-sglang](https://github.com/ekzhang/openjev-sglang), [nokia AnyJev](https://github.com/nokia-applied-research/AnyJev), [ikermoel/open-alternative-jev](https://github.com/ikermoel/open-alternative-jev), [bnsd55/jevmlx](https://github.com/bnsd55/jevmlx), [NullPo-jp/PocketJev](https://github.com/NullPo-jp/PocketJev) | checkpoints or load-time quantization; MLX 4-bit for the Apple ones | transformers, vLLM, SGLang or MLX | no (PocketJev: iPhone app) | mostly none |
+| [Llama Guard 4](https://huggingface.co/meta-llama/Llama-Guard-4-12B), [Llama Guard 3 1B](https://huggingface.co/meta-llama/Llama-Guard-3-1B) | safetensors; 3 1B also a pruned INT4 for mobile | transformers, vLLM, SGLang, ExecuTorch; community GGUF | mobile INT4 only | – |
+| [Qwen3Guard](https://huggingface.co/Qwen/Qwen3Guard-Gen-8B), [ShieldGemma](https://huggingface.co/google/shieldgemma-2b), [Granite Guardian 3.3](https://huggingface.co/ibm-granite/granite-guardian-3.3-8b), [Skywork-Reward-V2](https://huggingface.co/Skywork/Skywork-Reward-V2-Llama-3.1-8B) | safetensors | transformers, vLLM, SGLang; community GGUF / Ollama | no | – |
+| [Prompt Guard 2](https://huggingface.co/meta-llama/Llama-Prompt-Guard-2-86M), [ProtectAI deberta prompt-injection](https://huggingface.co/protectai/deberta-v3-base-prompt-injection-v2) | safetensors (ProtectAI also ONNX via Optimum) | transformers, ONNX Runtime | no | Prompt Guard 2: 92 ms per 512 tokens (A100) |
+| [NVIDIA NemoGuard 8B](https://huggingface.co/nvidia/llama-3.1-nemoguard-8b-content-safety), [Nemotron Safety Guard 8B v3](https://huggingface.co/nvidia/Llama-3.1-Nemotron-Safety-Guard-8B-v3) | LoRA adapter / safetensors | transformers, NIM container | NemoGuard: TensorRT-LLM inside NIM, datacenter GPUs; no Jetson | – |
+
+- Only NVIDIA's guard model has a TensorRT path, built inside its datacenter NIM container; none of the 24 ships a
+  Jetson or other embedded-GPU build.
+- First-party GGUF is rare (Mapika/decider); for the guard models GGUF and Ollama builds come from the community.
+- The norm is safetensors plus "use transformers, vLLM or SGLang"; optimized deployment is left to the user, with
+  extras aimed at consumer devices (MLX, ONNX/browser, Core ML).
+- Latency claims are rare and measured on each author's own hardware, so they are not comparable with each other or
+  with ours.
+
+Our position: three backbone variants (GPU int8, Q4_0 GGUF, AWQ int4), measured Orin numbers, and
+`scripts/tune_kernels.py` for other CUDA GPUs. No TensorRT engine: NVIDIA's TensorRT Edge-LLM supports the Qwen3.5
+backbones on Orin ([supported models](https://nvidia.github.io/TensorRT-Edge-LLM/latest/user_guide/getting_started/supported-models.html))
+but documents text generation only, while the decision head needs hidden states, adapters and one cached state forked
+into many option rows. OpenDecider does not run inside llama.cpp either (Mapika/decider does); the GGUF is used as a
+backbone source and run on our own loader.
+
 ## 2. Third-party measurements of Jev, next to our observations
 
 Rows map to O1–O8 in `docs/SPEC.md` §1. They are observations only.
