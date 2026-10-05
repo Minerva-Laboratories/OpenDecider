@@ -35,6 +35,7 @@ state + { route: choice[billing, technical, refund, other], urgent: noul, severi
 
 - [Features](#features)
 - [Results](#results)
+  - [Beyond accuracy](#beyond-accuracy)
 - [How we measure, and why](#how-we-measure-and-why)
 - [How it works](#how-it-works)
 - [Requirements](#requirements)
@@ -110,6 +111,32 @@ At P(injection) >= 0.5 on deepset's 116 test inputs; intervals, curves and the o
 probabilities around 0.3 to 0.5. With 25 to 50 labelled examples, isotonic calibration (`POST /v1/calibrate`) moves the threshold; on the
 stitched 9B this raised accuracy to 0.84 to 0.85. That is a fitted result, measured on halves of the benchmark itself,
 and is reported separately in `docs/RESULTS.md` §14.
+
+### Beyond accuracy
+
+One accuracy number hides how a model errs. For each benchmark we also report the measures that fit the task, from
+the same predictions, with 95% bootstrap intervals: all tables, curves and caveats in
+[`docs/RESULTS.md` §17](docs/RESULTS.md#17-task-appropriate-metrics-beyond-accuracy-2026-10-04) (script:
+`eval/report_metrics.py`).
+
+<p align="center"><img src="docs/img/injection_roc_pr.png" alt="ROC and precision-recall curves for prompt-injection detection" width="640"></p>
+
+<p align="center"><img src="docs/img/calibration_ece.png" alt="expected calibration error per benchmark and system" width="640"></p>
+
+| | PubMedQA F1 / MCC / ROC-AUC | Banking77 macro-F1 | OpenBookQA ECE | CommonsenseQA ECE |
+|---|---|---|---|---|
+| OpenDecider 9B | 0.91 / 0.77 / 0.96 | 0.85 | 0.042 | 0.097 |
+| OpenDecider 9B AWQ | 0.90 / 0.74 / 0.95 | 0.86 | 0.220 | 0.135 |
+| OpenDecider 2B | 0.88 / 0.67 / 0.91 | 0.81 | 0.056 | 0.039 |
+| Qwen3.5-9B, letter scores | 0.90 / 0.76 / 0.95 | 0.93 | 0.026 | 0.046 |
+
+- Injection detection: good ranking (ROC-AUC 0.96 for the 9B), but at the default threshold the models miss attacks
+  rather than raise false alarms (table above).
+- Banking77: most of the 9B's errors are one intent whose label name does not describe its messages (confusion matrix
+  in §17.3).
+- Multiple choice: no system prefers an answer position (§17.4).
+- Calibration: Qwen's letter scores are the best calibrated; the 4-bit 9B, whose temperatures were not refitted, is
+  underconfident on multiple choice. Reliability diagrams per system and benchmark are in §17.5.
 
 ### `none` option and conformal sets
 
