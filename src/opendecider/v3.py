@@ -264,7 +264,7 @@ class V3(DecisionModel):
         finally:
             vera.active = False
 
-    def _rows_forward(self, ids, mask, rows, pc, smask):
+    def _rows_forward(self, ids, mask, rows, pc, smask, position_ids=None):
         """One chunk of rows continuing from their states' caches -> wide features. With `v3_row_checkpoint` and a
         graph being built, the chunk is recomputed in backward: the function unpacks a FRESH cache and switches VeRA
         on itself, so the recompute sees the same inputs and adapters as the forward (peak = state graph + 1 chunk)."""
@@ -280,7 +280,7 @@ class V3(DecisionModel):
                 with shared_prefix_attention(bb, pc, rows, smask) if shared else contextlib.nullcontext():
                     f, _ = bb(ids, mask, layers=bb.cfg.feature_layers,
                               past_key_values=pc.unpack_rows(rows, attn_placeholder=shared),
-                              use_cache=True, past_mask=smask.index_select(0, rows))
+                              use_cache=True, past_mask=smask.index_select(0, rows), position_ids=position_ids)
                 return self._wide(f)
             finally:
                 if vera is not None:
@@ -379,7 +379,8 @@ class V3(DecisionModel):
         in context of the state and question, but never sees the other options (no causal order effects between
         options; comparison is left to the trunk). Rows are built by scatter from flat token-id tensors and run in
         chunks of `v3_branch_chunk` rows to bound the per-row GDN state copies."""
-        if self.cfg.v3_question_cache and self.cfg.v3_row_format == "answer":
+        if self.cfg.v3_question_cache and self.cfg.v3_row_format == "answer" and \
+                sum(len(q.options) for q in questions) >= self.cfg.v3_qcache_min_rows:
             return self._branched_feats_qcache(questions, mem, pc, smask, sh)
         bb, dev = self.backbone, self.backbone.device
         N = len(questions)
@@ -430,9 +431,11 @@ class V3(DecisionModel):
         """Two-level shared prefix: state cache -> ONE pass per question over [question + canonical candidate listing
         + "Answer:"] -> packed question cache -> every option row carries only its own answer tokens. Same features
         as repeating the question in each row (tested), but the listing is paid once per question, so long listings
-        (77- or 255-way) are affordable. Questions are grouped by EXACT token length: a question's cache must end at
-        its last real token (right pads would advance the GDN recurrent/conv state; left pads mid-sequence would
-        decay it), so each group is one unpadded batched pass."""
+        (77- or 255-way) are affordable. A question's cache must end at its last real token: with
+        `v3_question_batch` all questions share ONE right-padded pass whose pads leave the GDN state untouched
+        (Backbone.padded_continuation; pad keys masked, option rows positioned after their own question), else
+        questions are grouped by exact token length, one unpadded pass per group. Option rows then run sorted by
+        length in chunks of `v3_branch_chunk`, each chunk as wide as its longest option."""
         bb, dev = self.backbone, self.backbone.device
         N = len(questions)
         q_tok = bb.tokenize([answer_row_prefix(q.prompt, q.options, self.cfg.v3_list_cap) for q in questions])
@@ -462,24 +465,36 @@ class V3(DecisionModel):
         F = torch.zeros(M, Lo, self.d * nL, device=dev, dtype=fdt)
         B = self.cfg.v3_branch_chunk
         grad = self.training and torch.is_grad_enabled() and getattr(self, "vera", None) is not None
+        groups = [torch.arange(N)] if self.cfg.v3_question_batch else \
+            [(lq == Lg).nonzero().squeeze(1) for Lg in torch.unique(lq).tolist()]
         with self._row_pass():
-            for Lg in torch.unique(lq).tolist():                                  # one unpadded pass per length
-                gi = (lq == Lg).nonzero().squeeze(1)
+            for gi in groups:
                 sg = sidx[gi].to(dev)
-                fq, cache = bb(Qids[gi, :Lg].to(dev), torch.ones(len(gi), Lg, dtype=torch.bool, device=dev),
-                               layers=bb.cfg.feature_layers, past_key_values=pc.unpack_rows(sg), use_cache=True,
-                               past_mask=smask.index_select(0, sg))
+                Lg = int(lq[gi].max())
+                gmask = qmask[gi, :Lg].to(dev)
+                cache = pc.unpack_rows(sg)
+                padded = bool((lq[gi] < Lg).any())
+                with bb.padded_continuation(gmask, cache) if padded else contextlib.nullcontext():
+                    fq, cache = bb(Qids[gi, :Lg].to(dev), gmask, layers=bb.cfg.feature_layers, past_key_values=cache,
+                                   use_cache=True, past_mask=smask.index_select(0, sg))
                 Q[gi.to(dev), :Lg] = self._wide(fq).to(fdt)
                 pcq = PackedCache.pack(cache, kv_int8=(not grad) and kv_mode(bb.cfg),
                                        state_int8=bb.cfg.quantize_linear_state and not grad)
-                pmq = torch.cat([smask.index_select(0, sg), torch.ones(len(gi), Lg, dtype=torch.bool, device=dev)], 1)
+                pmq = torch.cat([smask.index_select(0, sg), gmask], 1)
                 ng = n_opt[gi]
                 local = torch.repeat_interleave(torch.arange(len(gi)), ng)                 # question-in-group per row
                 rows = opt_start[gi][local] + torch.arange(int(ng.sum())) - (torch.cumsum(ng, 0) - ng)[local]
+                # rows sorted by option length, each chunk only as wide as its longest option (no pad compute)
+                order = torch.argsort(lo[rows], stable=True)
+                rows, local = rows[order], local[order]
+                # option tokens continue right after their OWN question's last token (not after the pads)
+                pos0 = (smask.shape[1] + lq[gi])[local] if padded else None
                 for a in range(0, rows.numel(), B):                                         # bounded chunks
                     sl = slice(a, a + B)
-                    F[rows[sl].to(dev)] = self._rows_forward(O[rows[sl]].to(dev), omask[rows[sl]].to(dev),
-                                                             local[sl].to(dev), pcq, pmq).to(fdt)
+                    w = max(2, int(lo[rows[sl]].max()))
+                    pos = None if pos0 is None else (pos0[sl, None] + torch.arange(w)).to(dev)
+                    F[rows[sl].to(dev), :w] = self._rows_forward(O[rows[sl], :w].to(dev), omask[rows[sl], :w].to(dev),
+                                                                 local[sl].to(dev), pcq, pmq, pos).to(fdt)
             qm, om = qmask.to(dev), omask.to(dev)
             q_flat, o_flat = Q[qm], F[om]
             if self.cfg.v3_lm_feature:

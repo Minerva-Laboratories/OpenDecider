@@ -5,7 +5,8 @@
 Each config is "weights:cache[:graphs]": weights int8 | nf4 (bitsandbytes) | w8 | w4 (GemLite Triton GEMMs, round to
 nearest) | awq (pre-quantized AWQ checkpoint on GemLite int4 kernels, configs/*_awq.yaml), cache
 int8 | int4, ":graphs" = CUDA-graph engine (src/opendecider/deploy.py), ":qcache" = question-cache row path
-(exact; question tokens computed once per question instead of once per option). Embeddings stay int8
+(exact; question tokens computed once per question instead of once per option), ":serving" = the serving path
+load_decider installs (decider.prepare_inference_: question cache + tuned int8 kernels). Embeddings stay int8
 (every cached K/V and the state memory; GDN recurrent state stays bf16/fp32). Per config:
   memory  : GPU memory after load, and peak during one decide() for states of about 0.9k / 3.9k / 15k tokens
   latency : decide() wall time for the same states (prefix cache off; median of 3 after a warm-up call per size)
@@ -84,7 +85,7 @@ def main():
     with gpu_lock("bench_quant"):
         for c in a.configs:
             w, kv, *mode = c.split(":")
-            graphs, qcache = "graphs" in mode, "qcache" in mode
+            graphs, qcache, serving = "graphs" in mode, "qcache" in mode, "serving" in mode
             torch.cuda.empty_cache(); torch.cuda.reset_peak_memory_stats()
             over = {"weight_quant": w, "kv_quant": kv}
             if w == "awq" and ck["backbone_cfg"].get("weight_quant") != "awq":   # checkpoint not already on AWQ:
@@ -96,6 +97,9 @@ def main():
             model, extra = load_model(a.ckpt, backbone=bb)
             if qcache:                      # question read once per question; option rows carry only their tokens
                 model.cfg.v3_question_cache = True
+            if serving:                     # what load_decider serves: question cache + tuned int8 kernels
+                from opendecider.decider import prepare_inference_
+                prepare_inference_(model)
             dec = Decider(model, extra.get("temperature", 1.0), extra.get("temperature_by_type"))
             if graphs:
                 from opendecider.deploy import GraphEngine

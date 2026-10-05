@@ -135,6 +135,8 @@ class Int8Linear(nn.Module):
     def weight(self) -> torch.Tensor:  # some HF code paths read .weight.dtype/.device
         if self.__dict__.get("_dq") is not None:
             return self._dq
+        if self.__dict__.get("_fused") is not None:
+            return self._fused.dense_weight().t()
         return self.qweight.to(self.scale.dtype) * self.scale
 
     def materialize(self, dtype: torch.dtype) -> None:
@@ -145,6 +147,9 @@ class Int8Linear(nn.Module):
         self.qweight = torch.empty(0, dtype=torch.int8, device=self.qweight.device)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        fused = self.__dict__.get("_fused")
+        if fused is not None:
+            return fused(x)
         dq = self.__dict__.get("_dq")
         if dq is not None and dq.dtype == x.dtype:
             return F.linear(x, dq, None if self.bias is None else self.bias.to(x.dtype))
@@ -250,3 +255,100 @@ def gemlite_a8w8_(module: nn.Module) -> nn.Module:
         else:
             gemlite_a8w8_(child)
     return module
+
+
+# ---------------------------------------------------------------- fused int8 inference GEMMs (same weights)
+def int8_to_gemlite(m: Int8Linear) -> nn.Module:
+    """Int8Linear -> GemLite A16W8 holding the SAME int8 weights (stored as uint8 q+128 with zero point 128, one group
+    per row), so W = (q+128-128)*scale exactly. The GEMM reads int8 directly instead of expanding the whole weight to
+    bf16 on every call; outputs differ from the dequantize path only by bf16 rounding inside the kernel."""
+    from gemlite import DType, GemLiteLinear
+    q, s = m.qweight, m.scale
+    N, K = q.shape
+    dt = DType.BF16 if s.dtype == torch.bfloat16 else DType.FP16
+    g = GemLiteLinear(W_nbits=8, group_size=K, in_features=K, out_features=N, input_dtype=dt, output_dtype=dt)
+    g.pack((q.to(torch.int16) + 128).to(torch.uint8), s.view(N, 1), torch.full((N, 1), 128.0, dtype=s.dtype,
+                                                                               device=q.device), bias=m.bias)
+    g.in_features, g.out_features = K, N
+    return g
+
+
+class Int8GemLite(nn.Module):
+    """A GemLite A16W8 layer plus a dense path for large batches, from the SAME packed weights (no second copy).
+    GemLite is fastest for small and mid batch sizes; above `dense_from` tokens per call, expanding the weight once
+    and using cuBLAS is faster (crossover measured per shape by scripts/tune_kernels.py)."""
+
+    def __init__(self, g: nn.Module, dense_from: int | None = None):
+        super().__init__()
+        self.g, self.dense_from = g, dense_from
+        self.in_features, self.out_features = g.in_features, g.out_features
+
+    def dense_weight(self) -> torch.Tensor:
+        """(in, out) weight from GemLite's buffer: 4 uint8 values per int32 along `in` (k = 4*row + byte)."""
+        W, K, N = self.g.W_q, self.in_features, self.out_features
+        q = W.view(torch.uint8).view(K // 4, N, 4).permute(0, 2, 1).reshape(K, N)
+        return (q.to(self.g.scales.dtype) - 128) * self.g.scales
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.dense_from is not None and x.numel() // self.in_features >= self.dense_from:
+            y = x @ self.dense_weight()
+            return y if self.g.bias is None else y + self.g.bias
+        return self.g(x)
+
+
+def int8_to_gemlite_(module: nn.Module, dense_from: dict | None = None) -> int:
+    """Give every (non-materialized) Int8Linear under `module` an Int8GemLite on the same weights and free its own int8
+    copy. The Int8Linear OBJECTS stay in place, so forward hooks on them (VeRA adapters) keep working; dense_from maps
+    "out x in" to the batch size from which the dense path is used. Inference only: no backward. Returns the count."""
+    n = 0
+    for m in module.modules():
+        if isinstance(m, Int8Linear) and m.qweight.numel() and m.__dict__.get("_dq") is None:
+            key = f"{m.out_features}x{m.in_features}"
+            m.__dict__["_fused"] = Int8GemLite(int8_to_gemlite(m), (dense_from or {}).get(key))
+            m.qweight = torch.empty(0, dtype=torch.int8, device=m.qweight.device)
+            n += 1
+    return n
+
+
+def gemlite_config_path() -> str:
+    """Per-GPU file of tuned GemLite kernel configs (written by scripts/tune_kernels.py)."""
+    import os
+    import re
+    name = re.sub(r"[^a-z0-9]+", "_", torch.cuda.get_device_name().lower()).strip("_")
+    root = os.environ.get("OPENDECIDER_KERNEL_DIR", os.path.expanduser("~/.cache/opendecider/kernels"))
+    return os.path.join(root, f"gemlite_{name}_sm{''.join(map(str, torch.cuda.get_device_capability()))}.json")
+
+
+def load_gemlite_config() -> dict | None:
+    """Load this GPU's tuned configs into GemLite (autotuning off) and return the per-shape dense crossovers. None if
+    the GPU has not been tuned: untuned GemLite is slower than dequantize + cuBLAS at large M on the Orin
+    (scripts/bench_gemm.py), so callers keep the dequantize path."""
+    import json
+    import os
+    path = gemlite_config_path()
+    if not os.path.exists(path):
+        return None
+    import gemlite
+    gemlite.set_autotune(False)
+    gemlite.load_config(path)
+    cross = path.replace(".json", "_dense_from.json")
+    return json.load(open(cross)) if os.path.exists(cross) else {}
+
+
+def fast_int8_kernels_(backbone) -> int:
+    """Inference loaders: run the int8 decoder layers on tuned GemLite kernels when this GPU has a tuned config
+    (scripts/tune_kernels.py). OPENDECIDER_INT8_GEMM=dequant keeps the dequantize path. Returns layers swapped."""
+    import os
+    if os.environ.get("OPENDECIDER_INT8_GEMM", "auto") == "dequant" or backbone.device.type != "cuda":
+        return 0
+    if not any(isinstance(m, Int8Linear) for m in backbone.lm.layers.modules()):
+        return 0
+    try:
+        dense_from = load_gemlite_config()
+    except ImportError:
+        return 0
+    if dense_from is None:
+        return 0
+    n = int8_to_gemlite_(backbone.lm.layers, dense_from)
+    torch.cuda.empty_cache()
+    return n

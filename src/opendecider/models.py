@@ -55,6 +55,8 @@ class ModelConfig:
     v3_vera_rank: int = 256
     v3_vera_scope: str = "rows_top"      # rows_top: top-N layers, option rows only | all: every layer, state + rows
     v3_question_cache: bool = False      # branched answer rows: state -> question(+listing) cache -> option suffixes
+    v3_question_batch: bool = True       # question cache: ONE right-padded pass for all questions (else one per length)
+    v3_qcache_min_rows: int = 0          # question cache only when a call has at least this many option rows (0: always)
     v3_row_checkpoint: bool = False      # recompute each option-row chunk in backward (VeRA training memory)
     v3_layer_combine: str = "mix"        # multi-layer features -> one per token: mix (softmax weights) | attn (DepthAttn)
                                          # | stitch (linear map of unit-normalised layers into another backbone's space)

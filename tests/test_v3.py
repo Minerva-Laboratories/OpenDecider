@@ -406,3 +406,32 @@ def test_graph_engine_matches_eager_on_gpu():
             for k in a["answers"]:
                 pa, pb = torch.tensor(a["answers"][k]["probs_list"]), torch.tensor(b["answers"][k]["probs_list"])
                 assert (pa - pb).abs().max() < 3e-2
+
+
+def test_padded_question_pass_matches_length_groups():
+    """One right-padded question pass (pads leave the GDN state untouched, pad keys masked, option rows positioned after
+    their own question) == one unpadded pass per question length; with and without shared-prefix attention."""
+    import torch
+    from opendecider.batching import Question, state_texts
+    from tests.conftest import make
+    from tests.test_models import OPTS, STATE
+    from tests.tiny import tiny_backbone
+    bb = tiny_backbone(kv_quant="none", seed=5, layers=(4, "final"))
+    qs = [Question("Which team?", OPTS), Question("Is it urgent right now, given everything above?", ["yes", "no"]),
+          Question("Pick", ["a", "b", "c"]), Question("Which team handles it?", OPTS[::-1] + ["other"]),
+          Question("Is it urgent?", ["no", "yes"])]
+    qs[4].state_idx = 1
+    for shared in (False, True):
+        outs = []
+        for batch in (False, True):
+            m = make(bb, "v3", v3_features="branched", v3_row_format="answer", v3_lm_feature=True, v3_list_cap=255,
+                     v3_question_cache=True, v3_question_batch=batch, v3_branch_chunk=4,
+                     v3_shared_prefix=shared).eval()
+            torch.manual_seed(0)
+            with torch.no_grad():
+                seqs = bb.tokenize(state_texts([STATE, "Short other state."]))
+                ids, mask = bb.pad(seqs)
+                f = m._conditioned_feats(qs, m.memory_from_ids(ids, mask))
+                outs.append([t.float() for t in f[::2]] + [m._lm_lp.float()])
+        for a, b in zip(*outs):
+            torch.testing.assert_close(a, b, rtol=1e-4, atol=1e-4)

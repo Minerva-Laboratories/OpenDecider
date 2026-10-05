@@ -189,6 +189,8 @@ def main(argv=None):
     ap.add_argument("--limit", type=int, default=0, help="max records per file (debug)")
     ap.add_argument("--save-preds", action="store_true")
     ap.add_argument("--out-root", default="runs")
+    ap.add_argument("--serving", action="store_true",
+                    help="evaluate the serving path (decider.prepare_inference_: question cache, tuned int8 kernels)")
     a = ap.parse_args(argv)
 
     torch.manual_seed(a.seed)
@@ -204,6 +206,9 @@ def main(argv=None):
     t0 = time.perf_counter()
     with gpu_context(a.device, "eval"):
         model, ckpt_T = load_scorer(a.ckpt, a.baseline, a.backbone_config, a.device)
+        if a.serving and a.ckpt:
+            from opendecider.decider import prepare_inference_
+            prepare_inference_(model)
         model.eval()
         T, calib_info, T_type = None, None, None
         if a.temperature is not None:

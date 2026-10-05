@@ -29,6 +29,27 @@ def _normalize(p: torch.Tensor) -> list[float]:
     return p.tolist()
 
 
+# option rows per call from which the question cache is faster (scripts/bench_qcache_rows.py, Orin, 50 W, ~0.9k-token
+# state): about 64 on the 2B, about 12 on the 9B, where every repeated token costs ~4x more
+QCACHE_MIN_ROWS = {2048: 64, 4096: 12}
+
+
+def prepare_inference_(model) -> None:
+    """Speedups for serving that keep the trained function (both tested equal to the training-time path):
+    - branched answer rows read each question's prefix once (question cache) instead of once per option row, when a
+      call has at least QCACHE_MIN_ROWS option rows for this backbone (below that the extra question pass costs more
+      than it saves); OPENDECIDER_QCACHE=0 turns it off, OPENDECIDER_QCACHE_MIN_ROWS overrides the threshold;
+    - int8 decoder layers on tuned fused GEMMs when this GPU has been tuned (quant.fast_int8_kernels_)."""
+    from .quant import fast_int8_kernels_
+    cfg = model.cfg
+    if os.environ.get("OPENDECIDER_QCACHE", "1") != "0" and getattr(cfg, "v3_features", None) == "branched" \
+            and getattr(cfg, "v3_row_format", None) == "answer":
+        cfg.v3_question_cache = True
+        default = QCACHE_MIN_ROWS.get(model.backbone.hidden_size, 32)
+        cfg.v3_qcache_min_rows = int(os.environ.get("OPENDECIDER_QCACHE_MIN_ROWS", default))
+    fast_int8_kernels_(model.backbone)
+
+
 class Decider:
     def __init__(self, model: DecisionModel, temperature: float = 1.0, temperature_by_type: dict | None = None,
                  profiles_dir: str = "runs/profiles", conformal: dict | None = None):

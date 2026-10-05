@@ -165,7 +165,8 @@ def load_model(path_or_repo: str, backbone: str | None = None, device: str | Non
 
 def load_decider(path_or_repo: str, backbone: str | None = None, device: str | None = None,
                  kv_quant: str | None = None, revision: str | None = None):
-    from .decider import Decider
+    from .decider import Decider, prepare_inference_
     model, extra = load_model(path_or_repo, backbone, device, kv_quant, revision)
+    prepare_inference_(model)
     return Decider(model, temperature=extra.get("temperature", 1.0),
                    temperature_by_type=extra.get("temperature_by_type"), conformal=extra.get("conformal"))

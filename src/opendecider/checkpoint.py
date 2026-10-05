@@ -37,7 +37,8 @@ def load_model(path: str, backbone: Backbone | None = None, device: str | None =
 
 
 def load_decider(path: str):
-    from .decider import Decider
+    from .decider import Decider, prepare_inference_
     model, extra = load_model(path)
+    prepare_inference_(model)
     return Decider(model, temperature=extra.get("temperature", 1.0),
                    temperature_by_type=extra.get("temperature_by_type"), conformal=extra.get("conformal"))

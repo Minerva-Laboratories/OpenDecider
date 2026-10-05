@@ -135,14 +135,19 @@ class Backbone(nn.Module):
         return torch.cat(parts, -1)
 
     @torch.no_grad()
-    def token_logprob(self, h: torch.Tensor, tok: torch.Tensor, chunk: int = 32768) -> torch.Tensor:
-        """log softmax(h @ Wᵀ)[tok], normaliser by chunked log-sum-exp (never materializes n × vocab at once)."""
+    def token_logprob(self, h: torch.Tensor, tok: torch.Tensor, chunk: int = 32768,
+                      max_block_bytes: int = 1 << 30) -> torch.Tensor:
+        """log softmax(h @ Wᵀ)[tok], normaliser by chunked log-sum-exp. Never materializes n × vocab: vocabulary chunks
+        are dequantized once, and rows are processed in blocks so each logits block stays under max_block_bytes."""
         W, sc = self._head_rows()
         hb = h.to(torch.bfloat16)
         lse = torch.full((h.shape[0],), -float("inf"), device=h.device)
+        rows_per_block = max(1, max_block_bytes // (4 * min(chunk, W.shape[0])))
         for a in range(0, W.shape[0], chunk):
             Wc = W[a:a + chunk].to(torch.bfloat16) * (sc[a:a + chunk].to(torch.bfloat16) if sc is not None else 1)
-            lse = torch.logaddexp(lse, torch.logsumexp((hb @ Wc.t()).float(), dim=-1))
+            for r in range(0, h.shape[0], rows_per_block):
+                blk = slice(r, r + rows_per_block)
+                lse[blk] = torch.logaddexp(lse[blk], torch.logsumexp((hb[blk] @ Wc.t()).float(), dim=-1))
         rows = W[tok].float() * (sc[tok].float() if sc is not None else 1)
         return (h.float() * rows).sum(-1) - lse
 
@@ -191,7 +196,7 @@ class Backbone(nn.Module):
 
     def forward(self, ids: torch.Tensor, mask: torch.Tensor, layers: Sequence = ("final",),
                 hooks: dict | None = None, past_key_values=None, use_cache: bool = False,
-                past_mask: torch.Tensor | None = None):
+                past_mask: torch.Tensor | None = None, position_ids: torch.Tensor | None = None):
         """Run the frozen LM. Returns (features, cache). features: (B,T,d) for one layer, else (L,B,T,d).
 
         Gradients flow through activations (needed for V2's inserted blocks) but never into
@@ -216,10 +221,42 @@ class Backbone(nn.Module):
             attn_mask = torch.cat([past_mask.long(), attn_mask], 1)
         with self.layer_hooks(all_hooks):
             out = self.lm(input_ids=ids, attention_mask=attn_mask, past_key_values=past_key_values,
-                          use_cache=use_cache)
+                          use_cache=use_cache, position_ids=position_ids)
         feats = [out.last_hidden_state if l == "final" else captured[int(l)] for l in layers]
         f = feats[0] if len(feats) == 1 else torch.stack(feats, 0)
         return f, (out.past_key_values if use_cache else None)
+
+    @contextlib.contextmanager
+    def padded_continuation(self, mask: torch.Tensor, cache):
+        """A RIGHT-padded batch continuing `cache` that leaves every row's cache exactly where its last real token
+        left it, so rows of different lengths share one pass. Gated DeltaNet layers: at pad positions the decay
+        input a and the write strength b are set to -inf, so g = -exp(A)*softplus(-inf) = 0 and beta = sigmoid(-inf) =
+        0 and the recurrent state passes through unchanged; the conv state (last k inputs) is re-gathered at each row's
+        real end. Attention layers: callers mask the pad keys (past_mask) and give later tokens explicit positions.
+        Real positions are unaffected by construction (causal), so features equal one unpadded pass per row."""
+        keep = mask.bool()[..., None]
+        lens = mask.sum(1)
+        handles, inputs, prev = [], {}, {}
+        neg = lambda mod, args, out: torch.where(keep, out, torch.full((), -float("inf"), dtype=out.dtype,
+                                                                       device=out.device))
+        for i, layer in enumerate(self.lm.layers):
+            if self.layer_types[i] != "linear_attention":
+                continue
+            la = layer.linear_attn
+            prev[i] = cache.layers[i].conv_states[0]
+            handles += [la.in_proj_a.register_forward_hook(neg), la.in_proj_b.register_forward_hook(neg),
+                        la.in_proj_qkv.register_forward_hook(lambda mod, args, out, i=i: inputs.__setitem__(i, out))]
+        try:
+            yield
+        finally:
+            for h in handles:
+                h.remove()
+        for i, p in prev.items():                    # conv state = the k inputs ending at the last real token
+            full = torch.cat([p.to(inputs[i].dtype), inputs[i].transpose(1, 2)], 2)
+            k = p.shape[-1]
+            idx = (lens.to(full.device)[:, None] + torch.arange(k, device=full.device))[:, None].expand(-1,
+                                                                                                      full.shape[1], -1)
+            cache.layers[i].conv_states[0] = full.gather(2, idx).to(p.dtype)
 
     def embed(self, ids: torch.Tensor) -> torch.Tensor:
         return self.lm.embed_tokens(ids)
@@ -302,7 +339,9 @@ def _assign_recurrent(self, recurrent_states, state_idx: int = 0, **kw):
 
 
 def _assign_conv(self, conv_states, state_idx: int = 0, conv_kernel_size=None, **kw):
-    """Same as transformers' LinearAttentionLayer.update_conv_state (non-record_past path), but assigns."""
+    """Same as transformers' LinearAttentionLayer.update_conv_state (non-record_past path), but assigns, and returns
+    the conv input channels-last (same values): the causal-conv1d kernel is ~30x slower on the (B, C, L)-contiguous
+    tensor torch.cat produces (16 ms vs 0.5 ms for 64 rows on the Orin; outputs bit-identical)."""
     if not self.is_conv_states_initialized[state_idx]:
         self.lazy_initialization(conv_states=conv_states, state_idx=state_idx, conv_kernel_size=conv_kernel_size)
     if not self.has_previous_state[state_idx]:
@@ -314,7 +353,7 @@ def _assign_conv(self, conv_states, state_idx: int = 0, conv_kernel_size=None, *
     else:
         full = torch.cat([self.conv_states[state_idx], conv_states], dim=-1)
     self.conv_states[state_idx] = full[..., -self.conv_kernel_size[state_idx]:]
-    return full
+    return full.transpose(1, 2).contiguous().transpose(1, 2)
 
 
 _ASSIGNING: dict = {}

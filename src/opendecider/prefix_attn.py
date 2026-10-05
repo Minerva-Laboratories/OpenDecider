@@ -20,6 +20,7 @@ from torch.nn.attention import SDPBackend, sdpa_kernel
 from .quant import materialize
 
 MASK_ELEMS = 1 << 25            # max boolean-mask elements per SDPA call (32M)
+BATCHED_BYTES = 1 << 30         # max gathered prefix K/V (+ copies) for the one-call multi-state path
 
 
 def _kernels(dev):
@@ -51,6 +52,21 @@ def _forward(mod, ctx, hidden_states, position_embeddings, attention_mask=None, 
     Hkv, g = k.shape[1], q.shape[1] // k.shape[1]
     T = Kp.shape[2]
     dev = q.device
+    if ctx.get("row_state") is not None:
+        # all rows in ONE call: each row reads its state's prefix K/V (gathered), pads masked; no per-state loop
+        st = ctx["row_state"]
+        K = torch.cat([Kp.index_select(0, st), k], 2)                         # (R, Hkv, T + t, D)
+        V = torch.cat([Vp.index_select(0, st), v], 2)
+        mask = ctx["bmask"].get(t)
+        if mask is None:                                                       # same for every layer of the pass
+            qpos = torch.arange(t, device=dev).repeat(g)                       # query (head-in-group, pos) -> pos
+            own = torch.arange(t, device=dev)[None, :] <= qpos[:, None]        # (g t, t) causal within the row
+            mask = ctx["bmask"][t] = torch.cat([ctx["pmask"].index_select(0, st)[:, None, None, :].expand(
+                R, 1, g * t, T), own[None, None].expand(R, 1, g * t, t)], 3)
+        with _kernels(dev):
+            o = F.scaled_dot_product_attention(q.reshape(R, Hkv, g * t, D), K, V, attn_mask=mask, scale=mod.scaling)
+        o = o.reshape(R, Hkv * g, t, D).transpose(1, 2).reshape(R, t, -1)
+        return mod.o_proj(o * torch.sigmoid(gate)), None
     out = torch.empty(R, Hkv, g, t, D, device=dev, dtype=v.dtype)
     qg = q.view(R, Hkv, g, t, D)
     rmax = ctx["rows_of_max"]
@@ -62,7 +78,8 @@ def _forward(mod, ctx, hidden_states, position_embeddings, attention_mask=None, 
             Kps, Vps, Ts, pm = Kp[s], Vp[s], T, ctx["pmask"][s]
         else:
             off = ctx["pad"][s]                                                # left padding of this state's prefix
-            Kps, Vps, Ts, pm = Kp[s][:, off:], Vp[s][:, off:], T - off, None   # (Hkv, T_s, D): real prefix only
+            Kps, Vps, Ts = Kp[s][:, off:], Vp[s][:, off:], T - off             # (Hkv, T_s, D): from the 1st real key
+            pm = ctx["pmask"][s, off:] if ctx["holes"][s] else None            # pads after it (padded question pass)
         # rows in groups so the boolean mask (queries x keys) stays under MASK_ELEMS
         per = max(1, MASK_ELEMS // (g * t * (Ts + t)))
         for a in range(0, r.numel(), per):
@@ -93,20 +110,30 @@ def _forward(mod, ctx, hidden_states, position_embeddings, attention_mask=None, 
 def shared_prefix_attention(bb, pc, rows: torch.Tensor, pmask: torch.Tensor, static: bool = False):
     """While active, full-attention layers attend to pc's per-state K/V (dequantized once) for rows `rows`
     (row i reads state rows[i]); pmask (S, T) marks real prefix tokens. static=True (CUDA graphs): shapes stay fixed,
-    prefix pads are masked instead of sliced, and nothing is read back to the host."""
+    prefix pads are masked instead of sliced, and nothing is read back to the host. Otherwise leading pads are sliced
+    off and any later pads (a right-padded question pass, see V3._branched_feats_qcache) are masked."""
     kv = {}
     for li, _ in _attn_modules(bb):
         K = materialize(pc.tensors[(li, "keys", None)]).to(bb.dtype)
         V = materialize(pc.tensors[(li, "values", None)]).to(bb.dtype)
         kv[li] = (K, V)
     if static:                                                                # one state, every row reads it
-        states, rows_of, pad = [0], {0: torch.arange(rows.numel(), device=rows.device)}, None
+        states, rows_of, pad, holes = [0], {0: torch.arange(rows.numel(), device=rows.device)}, None, None
     else:
         states = torch.unique(rows).tolist()
         rows_of = {s: (rows == s).nonzero().squeeze(1) for s in states}
-        pad = (~pmask.bool()).sum(1).tolist()                                 # prefixes are LEFT-padded
-    ctx = {"kv": kv, "pad": pad, "pmask": pmask.bool(), "states": states, "rows_of": rows_of, "static": static,
+        pm = pmask.bool()
+        pad = pm.int().argmax(1).tolist()                                     # leading pads (left-padded states)
+        holes = ((~pm).sum(1).cpu() > torch.tensor(pad)).tolist()              # pads after the first real key
+    ctx = {"kv": kv, "pad": pad, "holes": holes, "pmask": pmask.bool(), "states": states,
+           "rows_of": rows_of, "static": static,
            "rows_of_max": max(int(v.numel()) for v in rows_of.values())}
+    if not static and kv and len(states) > 1:
+        # several states (e.g. one per question with the question cache): one batched call per layer when the
+        # gathered per-row prefix K/V stays small, instead of one call per state
+        K0 = next(iter(kv.values()))[0]
+        if rows.numel() * K0[0].numel() * K0.element_size() * 4 <= BATCHED_BYTES:
+            ctx["row_state"], ctx["bmask"] = rows.to(K0.device), {}
     mods = _attn_modules(bb)
     for _, m in mods:
         m.forward = types.MethodType(lambda self, *a, **k: _forward(self, ctx, *a, **k), m)
