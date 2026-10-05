@@ -16,13 +16,14 @@ from opendecider.hub import export  # noqa: E402
 QWEN2B = {"repo_id": "Qwen/Qwen3.5-2B", "revision": "15852e8c16360a2fea060d615a32b45270f8a8fc"}
 AWQ2B = {"repo_id": "cyankiwi/Qwen3.5-2B-AWQ-4bit", "revision": "718fd9b52c5ca16f1f856f6c4e4209129802a6a2"}
 QWEN9B = {"repo_id": "Qwen/Qwen3.5-9B", "revision": "c202236235762e1c871ad0ccb60c8ee5ba337b9a"}
+AWQ9B = {"repo_id": "cyankiwi/Qwen3.5-9B-AWQ-4bit", "revision": "156edc4bbeb8d1910ee7be9196bafaf1bc052156"}
 GGUF9B = {"repo_id": "unsloth/Qwen3.5-9B-MTP-GGUF", "revision": "9716a636ee4bddc3fed678220b7a33dd2a4160ae",
           "gguf_file": "Qwen3.5-9B-Q4_0.gguf", "config_repo": QWEN9B["repo_id"], "config_revision": QWEN9B["revision"]}
 PUBLIC = [("banking77_8way", "Banking77 8-way"), ("prompt_injections", "Prompt-injection detection"),
           ("openbookqa", "OpenBookQA"), ("commonsenseqa", "CommonsenseQA"), ("pubmedqa", "PubMedQA")]
 
 RELEASES = [
-    {"name": "opendecider-2b", "title": "OpenDecider 2B", "run": "runs/x2b-clean3", "default": "int8",
+    {"name": "opendecider-2b", "title": "OpenDecider 2B", "base_model": QWEN2B["repo_id"], "run": "runs/x2b-clean3", "default": "int8",
      "variants": {"int8": ("int8", QWEN2B), "w8": ("w8", QWEN2B), "nf4": ("nf4", QWEN2B), "awq": ("awq", AWQ2B)},
      "bench": ("runs/quant/release_2b.json", "runs/quant/fresh/2b_{cfg}.json",
                {"int8": "int8:int8", "w8": "w8:int8", "nf4": "nf4:int8", "awq": "awq:int8"}),
@@ -32,7 +33,7 @@ RELEASES = [
      "backbone_note": f"frozen Qwen3.5-2B ({QWEN2B['repo_id']}, Apache-2.0)",
      "requirements": "CUDA GPU with about 2.5 GB free for states up to 1k tokens (3.1 GB at 15k). The `int8` variant "
                      "also runs on CPU (slow). Disk: 4.3 GB for the backbone download."},
-    {"name": "opendecider-9b", "title": "OpenDecider 9B", "run": "runs/x9b-clean3", "default": "gguf-q4_0",
+    {"name": "opendecider-9b", "title": "OpenDecider 9B", "base_model": QWEN9B["repo_id"], "run": "runs/x9b-clean3", "default": "gguf-q4_0",
      "variants": {"gguf-q4_0": ("int8", GGUF9B)},
      "bench": ("runs/quant/release_9b.json", "runs/quant/fresh/9b_{cfg}.json", {"gguf-q4_0": "int8:int8"}),
      "evals": "x9b-clean3",
@@ -42,6 +43,16 @@ RELEASES = [
      "backbone_note": f"frozen Qwen3.5-9B, Q4_0 GGUF from {GGUF9B['repo_id']} (Apache-2.0)",
      "requirements": "CUDA GPU with about 10 GB free for states up to 1k tokens (11 GB at 15k). Disk: 5.6 GB for the "
                      "GGUF backbone."},
+    {"name": "opendecider-9b-awq", "title": "OpenDecider 9B AWQ (4-bit)", "base_model": QWEN9B["repo_id"], "run": "runs/x2b-clean3-stitch9b-awq",
+     "default": "awq", "variants": {"awq": ("awq", AWQ9B)},
+     "bench": ("runs/quant/9b_clean3_awq.json", "runs/quant/fresh/9b_awq_{cfg}.json", {"awq": "awq:int8"}),
+     "evals": "x2b-clean3-stitch9b-awq",
+     "summary": "The 2B checkpoint's trunk and heads moved to the 4-bit AWQ 9B with a closed-form ridge map fitted on the "
+                "AWQ backbone's own features (no gradient steps on the 9B). About 3 GB less GPU memory than "
+                "opendecider-9b and faster on short states, 1 to 2 points lower on knowledge-heavy multiple choice.",
+     "backbone_note": f"frozen Qwen3.5-9B, AWQ int4 from {AWQ9B['repo_id']} (Apache-2.0)",
+     "requirements": "CUDA GPU with about 7 GB free for states up to 1k tokens (8.2 GB at 15k). Disk: about 8.5 GB for "
+                     "the AWQ backbone."},
 ]
 
 DATA = """## Training data and licenses
@@ -104,8 +115,13 @@ def results(rel, ck):
         raw = json.load(open(f"runs/public-{tag}/eval_{key}.json"))["raw"]
         rows.append(f"| {label} | {_ci(raw['accuracy'])} | {raw['nll']['value']:.3f} |")
     td = print_metrics(tag, list(load_preds(f"runs/td-{tag}").values()))
-    pooled = json.load(open(f"runs/none-{tag}/results.json"))["report"]["pooled"]
-    au = {k: v["value"] for k, v in pooled["auroc_none"].items()}
+    none_path = f"runs/none-{tag}/results.json"
+    none_md = ""
+    if os.path.exists(none_path):
+        au = {k: v["value"] for k, v in json.load(open(none_path))["report"]["pooled"]["auroc_none"].items()}
+        none_md = (f"`none` option (\"none of the above\", on by default), AUROC of P(none) against answerable questions on "
+                   f"the five public benchmarks: correct option removed {au['gold_removed']:.3f}, only plausible wrong "
+                   f"options left {au['hard']:.3f}, state unrelated to the question {au['unrelated']:.3f}.")
     conf = ck["extra"].get("conformal", {}).get("lac", {})
     n_conf = ", ".join(f"{k} {len(v)}" for k, v in sorted(conf.items()))
     return f"""## Results (zero-shot, default variant)
@@ -121,9 +137,7 @@ teacher model, so the score measures agreement with that teacher; the dataset ca
 this checkpoint scores {td['accuracy'][0]:.3f} [{td['accuracy'][1]:.3f}, {td['accuracy'][2]:.3f}] (KL to the teacher
 distribution {td['kl'][0]:.3f}). We do not train or tune on it.
 
-`none` option ("none of the above", on by default), AUROC of P(none) against answerable questions on the five public
-benchmarks: correct option removed {au['gold_removed']:.3f}, only plausible wrong options left {au['hard']:.3f}, state
-unrelated to the question {au['unrelated']:.3f}.
+{none_md}
 
 Conformal prediction sets (`"conformal": {{"alpha": 0.1}}` in a request) use calibration scores stored in this
 checkpoint ({n_conf} questions from the training families' calibration split). Coverage holds for requests like that
@@ -162,6 +176,8 @@ def card(rel, ck):
     return f"""---
 license: apache-2.0
 library_name: opendecider
+base_model: {rel['base_model']}
+pipeline_tag: text-classification
 tags: [decision-model, classification, calibration, qwen3.5]
 ---
 

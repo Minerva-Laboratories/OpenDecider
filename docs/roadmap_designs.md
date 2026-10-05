@@ -411,3 +411,19 @@ question each). Faithfulness reads only the explanation, with option names maske
 - Latency is eager decoding on the Orin; the state is re-encoded instead of reusing the prefix cache.
 
 Source: `runs/explain/results.json`.
+
+## Hypothesis (not scheduled): isolate instructions before deciding on injection
+
+Noted 2026-10-04. Our clean models rank injection attempts well (AUROC about 0.96 on deepset/prompt-injections) but are
+conservative zero-shot, and detection over raw text has to separate content from instructions in one step. The
+hypothesis: decision models alone will not detect injections robustly in practice, though they may improve on current
+methods. What should work better is a two-stage design:
+
+1. A separate model, in a separate context, rewrites or extracts what the instruction to the assistant actually is,
+   isolating it from untrusted content (documents, emails, tool output).
+2. The main model and the decision models then judge the isolated instruction: is it the user's, is it allowed, does
+   it conflict with the system instruction. These are easier, cleaner decisions than detection over mixed text.
+
+Experiments, when this resumes: decision on raw text vs on the rewritten instruction, with the rewriter in a separate
+context; robustness to injected instructions inside a state (not only detection); a held-out injection set not used for
+any earlier choice.

@@ -1,6 +1,8 @@
 ---
 license: apache-2.0
 library_name: opendecider
+base_model: Qwen/Qwen3.5-2B
+pipeline_tag: text-classification
 tags: [decision-model, classification, calibration, qwen3.5]
 ---
 
@@ -39,9 +41,7 @@ teacher model, so the score measures agreement with that teacher; the dataset ca
 this checkpoint scores 0.485 [0.460, 0.510] (KL to the teacher
 distribution 0.342). We do not train or tune on it.
 
-`none` option ("none of the above", on by default), AUROC of P(none) against answerable questions on the five public
-benchmarks: correct option removed 0.817, only plausible wrong options left 0.803, state
-unrelated to the question 0.816.
+`none` option ("none of the above", on by default), AUROC of P(none) against answerable questions on the five public benchmarks: correct option removed 0.817, only plausible wrong options left 0.803, state unrelated to the question 0.816.
 
 Conformal prediction sets (`"conformal": {"alpha": 0.1}` in a request) use calibration scores stored in this
 checkpoint (choice 406, noul 393, score 84 questions from the training families' calibration split). Coverage holds for requests like that
