@@ -287,6 +287,8 @@ def main(argv=None):
     ap.add_argument("--n-repeat", type=int, default=50)
     ap.add_argument("--sampler-k", type=int, default=1)
     ap.add_argument("--no-latency", action="store_true")
+    ap.add_argument("--probes", nargs="+", help="subset of: permutation dummy duplicate label_length repeat latency")
+    ap.add_argument("--serving", action="store_true", help="the serving path (decider.prepare_inference_)")
     ap.add_argument("--seed", type=int, default=0)
     a = ap.parse_args(argv)
     from .evaluate import load_scorer, gpu_context
@@ -294,11 +296,15 @@ def main(argv=None):
     name = a.name or (os.path.splitext(os.path.basename(a.ckpt))[0] if a.ckpt else a.baseline)
     with gpu_context(a.device, "probes"):
         model, temp = load_scorer(a.ckpt, a.baseline, a.backbone_config, a.device)
+        if a.serving and a.ckpt:
+            from opendecider.decider import prepare_inference_
+            prepare_inference_(model)
         fn = model_decide_fn(model, temp, a.sampler_k)
         req_fn = None if (a.no_latency or a.baseline) else model_request_fn(model)
-        res = run_battery(fn, items, req_fn, n_perm=a.n_perm, n_repeat=a.n_repeat, seed=a.seed)
+        kw = {"probes": tuple(a.probes)} if a.probes else {}
+        res = run_battery(fn, items, req_fn, n_perm=a.n_perm, n_repeat=a.n_repeat, seed=a.seed, **kw)
     res["meta"] = {"name": name, "ckpt": a.ckpt, "baseline": a.baseline, "items": a.items, "seed": a.seed,
-                   "sampler_k": a.sampler_k, "device": a.device,
+                   "sampler_k": a.sampler_k, "device": a.device, "serving": a.serving, "probes": a.probes,
                    "slot_emb": getattr(getattr(model, "cfg", None), "slot_emb", None),
                    "variant": getattr(getattr(model, "cfg", None), "variant", None)}
     from opendecider.guards import require_free_gb

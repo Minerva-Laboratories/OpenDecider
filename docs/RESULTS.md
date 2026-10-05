@@ -889,6 +889,79 @@ than it at large batches. No TensorRT engine was built: the backbone's Gated Del
 (fla, causal-conv1d) with a per-row recurrent state, which an ONNX → TensorRT export does not cover without custom
 plugins.
 
+### 16.5 Memory (2026-10-05)
+
+The serving path of 2026-10-04 used more memory than the model needs: a 15k-token state took 13.3 GB on the 9B. Three
+changes, measured in fresh processes (`scripts/bench_quant.py`, 3 questions, 50 W mode). KV cache: int8, except the
+AWQ rows other than "shipped", which use int4 (the difference is about 0.1 GB at 15k tokens):
+
+| Model, configuration | Weights | Peak GPU memory, 0.8k / 3.7k / 15k-token state | Latency, same states |
+|---|---|---|---|
+| 9B: Serving path, 2026-10-04 | 8.62 GB | 9.83 / 10.77 / 13.25 GB | 2.49 / 6.53 / 19.66 s |
+| 9B: + question pass on one shared state cache | 8.62 GB | 9.67 / 10.07 / 11.07 GB | 2.51 / 6.48 / 18.99 s |
+| 9B: + Q4_0 embedding table and LM head (shipped) | 7.79 GB | 8.84 / 9.24 / 10.24 GB | 2.56 / 6.61 / 19.12 s |
+| 9B: + state pass in 2k-token slices (option) | 7.79 GB | 8.84 / 9.24 / 9.67 GB | 2.58 / 7.80 / 30.41 s |
+| 9B AWQ: Serving path, 2026-10-04 | 5.74 GB | 6.90 / 7.77 / 9.95 GB | 2.45 / 6.93 / 26.66 s |
+| 9B AWQ: + question pass on one shared state cache | 5.74 GB | 6.77 / 7.15 / 8.17 GB | 2.46 / 6.81 / 25.86 s |
+| 9B AWQ: + Q4_0 embedding table and LM head (shipped) | 4.91 GB | 5.94 / 6.34 / 7.34 GB | 2.55 / 6.87 / 25.84 s |
+| 9B AWQ: + state pass in 2k-token slices (option) | 4.91 GB | 5.94 / 6.32 / 6.66 GB | 2.56 / 7.21 / 29.02 s |
+| 2B: Serving path (shipped) | 1.88 GB | 2.41 / 2.48 / 3.11 GB | 0.90 / 1.92 / 5.93 s |
+| 2B: + state pass in 2k-token slices | 1.88 GB | 2.41 / 2.48 / 2.82 GB | 0.88 / 2.30 / 8.80 s |
+| 2B: + Q4_0 tables | 1.67 GB | 2.20 / 2.27 / 2.61 GB | 0.93 / 2.34 / 8.84 s |
+
+- **Question pass on one shared state cache.** The question pass ran through standard attention, which expanded the
+  state's keys and values to bf16 once per question for all layers at once (about 0.5 GB per question at 15k tokens
+  on the 9B). It now uses the shared-prefix attention of the option rows and keeps only each question's own keys and
+  values; rows join the state's and their question's keys one layer at a time. Same outputs (tests); the 9B at 15k
+  tokens goes from 13.25 to 11.07 GB, the level of the previous path, and gets slightly faster.
+- **Q4_0 embedding table and LM head.** Qwen3.5's vocabulary has 248k tokens, so these two tables were 2 GB of the
+  9B's "weights" in int8. Stored as llama.cpp's Q4_0 blocks (32 values and one fp16 scale; for the GGUF 9B's Q4_0
+  embedding this reproduces the file's values exactly) they take 0.57 GB each. On the five benchmarks of §13.2, 19 of
+  2,666 answers change on the 9B and accuracy, NLL and ECE are unchanged within noise, so it is the default for both
+  9B releases. On the 2B, which reads one shared table for input and output, 93 answers change and OpenBookQA and
+  CommonsenseQA drop 1.6 and 0.9 points for 0.21 GB saved, so the 2B keeps int8 (`table_quant` in the backbone config).
+- **State pass in slices** (`prefill_chunk`). Bounds the activations of long states but is not the default: on the
+  int8 9B it saves 0.6 GB at 15k tokens and costs 60% more time (each 2k-token slice crosses the batch size at which
+  the int8 layers expand their weights, so the expansion happens per slice); on the AWQ 9B it saves 0.7 GB for 12%.
+
+What remains on top of the weights is about 1 to 2.5 GB at 15k tokens. The largest cost for requests with many
+options is now each option row's copy of its question's Gated DeltaNet state (about 50 MB per row on the 9B, in
+chunks of 64 rows); engines copy recurrent state per sequence too (`docs/LANDSCAPE.md` §1.5).
+
+### 16.6 Latency over options and questions
+
+`eval/probes.py --probes latency --serving`, the state of the probe items (short), median of 5:
+
+| Options x questions | 2B, previous path | 2B, serving path | 9B, serving path |
+|---|---|---|---|
+| 2 x 1 | 0.66 s | 0.81 s | 1.05 s |
+| 2 x 4 | 0.74 s | 0.82 s | 1.58 s |
+| 2 x 16 | 1.40 s | 1.56 s | 2.48 s |
+| 2 x 64 | 3.99 s | 2.96 s | 7.21 s |
+| 8 x 1 | 0.79 s | 0.80 s | 1.82 s |
+| 8 x 4 | 1.55 s | 1.70 s | 1.74 s |
+| 8 x 16 | 5.17 s | 2.32 s | 4.66 s |
+| 8 x 64 | 19.01 s | 6.15 s | 13.87 s |
+| 32 x 1 | 0.81 s | 0.79 s | 1.63 s |
+| 32 x 4 | 2.07 s | 2.05 s | 3.00 s |
+| 32 x 16 | 6.38 s | 4.46 s | 7.53 s |
+| 32 x 64 | 23.86 s | 14.26 s | 25.76 s |
+| 128 x 1 | 2.09 s | 2.10 s | 3.25 s |
+| 128 x 4 | 6.38 s | 4.57 s | 7.67 s |
+| 128 x 16 | 24.07 s | 14.34 s | 25.58 s |
+| 128 x 64 | 94.66 s | 53.76 s | 99.45 s |
+| 255 x 1 | 3.23 s | 2.50 s | 4.64 s |
+| 255 x 4 | 11.89 s | 7.42 s | 14.35 s |
+| 255 x 16 | 47.45 s | 27.33 s | 53.77 s |
+| 255 x 64 | 188.58 s | 106.11 s | 214.36 s |
+
+- With many options or questions the serving path is 1.4 to 3.1 times faster on the 2B. On the smallest requests
+  (2 to 8 options, 1 to 4 questions) the 2B is up to 0.15 s slower than before: the fused Triton kernels cost more CPU
+  time per launch than cuBLAS on the Orin, and these passes are launch-bound. A lower batch-size threshold for the
+  fused kernels, measured by `scripts/tune_kernels.py`, would remove it; not done yet.
+- The 9B's previous-path grid ran out of the 24 GB evaluation budget at 255 options x 64 questions (every row repeats
+  the question and the listing), so there is no previous-path column for it.
+
 ## 17. Task-appropriate metrics beyond accuracy (2026-10-04)
 
 `eval/report_metrics.py` recomputes, from the saved per-item outputs of §13.2 (raw logits, temperature 1; no model
@@ -1012,6 +1085,73 @@ mean error rate over all coverage levels when the least confident answers are dr
   temperatures (choice 1.02), which were not refitted on the 4-bit model. The trained 9B and Qwen's letter scores are
   close to the diagonal.
 - Per-benchmark Brier, AURC and the reliability bins for every system are in `runs/metrics_report.json`.
+
+## 18. Behavioral probes and explanations on the clean release (2026-10-05)
+
+### 18.1 Probe battery
+
+`eval/probes.py` on 60 items (`runs/probe_items.jsonl`), released path, int8 backbones; means with 95% bootstrap
+intervals. TV = total-variation distance between probability distributions.
+
+| Probe | OpenDecider 9B | OpenDecider 2B | Previous 2B release |
+|---|---|---|---|
+| Option order: mean TV over 20 orderings | 0.0019 [0.0011, 0.0028] | 0.0028 [0.0022, 0.0035] | 0.0000 [0.0000, 0.0000] |
+| Option order: worst ordering | 0.0041 [0.0024, 0.0062] | 0.0055 [0.0043, 0.0068] | 0.0000 [0.0000, 0.0000] |
+| Irrelevant option added: its probability | 0.0076 [0.0039, 0.0124] | 0.0250 [0.0183, 0.0320] | 0.0357 [0.0251, 0.0482] |
+| Irrelevant option added: TV of the others, renormalised | 0.0215 [0.0114, 0.0341] | 0.0305 [0.0224, 0.0401] | 0.0388 [0.0286, 0.0508] |
+| Duplicate option: probability gained by the pair | 0.0199 [0.0110, 0.0312] | 0.0443 [0.0338, 0.0569] | 0.0442 [0.0317, 0.0589] |
+| Duplicate option: share of the first copy | 0.4991 [0.4973, 0.5008] | 0.5004 [0.4988, 0.5020] | 0.5000 [0.5000, 0.5000] |
+| Long labels (same meaning): TV, all labels long | 0.0682 [0.0382, 0.1019] | 0.1134 [0.0901, 0.1377] | 0.2384 [0.2049, 0.2746] |
+| Long labels: mean shift, one label long | 0.0128 [0.0012, 0.0264] | 0.0293 [0.0182, 0.0418] | 0.0904 [0.0491, 0.1405] |
+| Repeat calls (50 identical) | deterministic | deterministic | deterministic |
+
+- Both clean models are deterministic and nearly order-invariant. The 9B is more robust than the 2B on every probe:
+  an irrelevant option takes less probability (0.008 vs 0.025), a duplicated option gains less (0.020 vs 0.044), and
+  rewording labels at the same meaning moves the output less (TV 0.068 vs 0.113). Duplicates split evenly between
+  the two copies (0.50), so neither model prefers a position.
+- Against the previous 2B release, sensitivity to label wording halved (TV 0.113 vs 0.238).
+
+### 18.2 Where the small order effect comes from
+
+The previous release measured exactly 0 on the permutation probe; the clean models measure about 0.002 to 0.003.
+`scripts/permutation_check.py` reruns the probe on the 2B with the two attention paths for option rows:
+
+| Option-row attention | Mean TV | Worst TV |
+|---|---|---|
+| Shared prefix, fused (default) | 0.0028 | 0.024 |
+| Per row (each row with its own copy of the state's keys and values) | 3.0e-08 | 2.2e-07 |
+
+The model itself is order-invariant (differences at float precision with the per-row path). The effect comes from
+the fused shared-prefix attention: each row's own keys sit at a different position in the shared attention call
+depending on the row's index, which changes the floating-point summation order. The worst case, 0.024 in
+probability, is larger than float noise usually is. A fix that keeps the speed is to compute attention over the
+shared prefix and over each row's own tokens separately and merge them by their log-sum-exp (Hydragen), so every row
+sees the same key layout; not done yet. `v3_shared_prefix: false` gives exact invariance at a memory cost.
+
+### 18.3 Explanations
+
+`eval/explain_eval.py` on 24 typed-decisions cases (4 samples each), the explanation generated by the frozen backbone
+and judged by the decision model reading only the explanation (option names masked). No labels are needed: the
+target is the model's own decision. Previous rows are the earlier releases (`runs/explain-*-fast`).
+
+| | 9B | 9B, previous (stitched) | 2B | 2B, previous |
+|---|---|---|---|---|
+| Decision recovered from the explanation alone (24 cases) | 92% | 92% | 79% | 79% |
+| Same, from a mismatched explanation (control) | 46% | 38% | 38% | 29% |
+| P(decision) given the explanation alone | 0.87 | 0.68 | 0.60 | 0.72 |
+| P(decision), best of 4 sampled explanations | 0.96 | 0.76 | 0.70 | 0.87 |
+| P(decision), mismatched explanation | 0.50 | 0.34 | 0.33 | 0.32 |
+| P(decision), empty state | 0.40 | 0.31 | 0.28 | 0.29 |
+| Drop in P(decision) without the top evidence record | 0.37 | 0.16 | 0.14 | 0.26 |
+| Median time per explanation | 40.3 s | 30.6 s | 13.3 s | 9.4 s |
+
+- The clean 9B's explanations carry more of the evidence than before: the decision model is 0.87 sure of the
+  decision from the explanation alone (0.68 before), against 0.50 from a mismatched explanation and 0.40 from no
+  information. Recovery of the decision stays at 92% (22 of 24). With 24 cases, differences of one or two cases are
+  within noise.
+- The 2B recovers the decision as often as before (79%) with a lower P(decision) (0.60 vs 0.72).
+- Times are in the Orin's 50 W mode; the earlier runs did not record their power mode, so the difference in time
+  is not attributed.
 
 ## Sources for numbers not measured here
 

@@ -53,7 +53,7 @@ state + { route: choice[billing, technical, refund, other], urgent: noul, severi
 | Feature | What it does |
 |---|---|
 | Typed questions | `choice` (up to 255 options, more with a two-stage shortlist), `noul` (yes/no), `score` (ordinal levels with an expected value). |
-| Order invariance | Option order does not change the output. One pass, no permutation averaging. Unit-tested. |
+| Order invariance | The model reads options without positions: one pass, no permutation averaging. With the default fused attention, reordering moves probabilities by 0.002 to 0.003 on average (float summation order; exact with `v3_shared_prefix: false`, `docs/RESULTS.md` §18.2). |
 | `none` option | Every question gets a "none of the above" option. It is trained (correct option removed or question unanswerable → `none`), and its probability is reported next to your options. |
 | Calibration | Trained with cross-entropy plus Brier, temperatures fitted per question type. `POST /v1/calibrate` fits a profile from your labels and picks the calibrator by cross-validation. |
 | Conformal sets | `"conformal": {"alpha": 0.1}` returns the options that cannot be ruled out at that level, and whether to abstain. |
@@ -198,12 +198,15 @@ been measured in MAXN), against the previous path:
 | 3 questions, 3.7k-token state | 1.92 → 1.92 s | 7.49 → 6.53 s | 7.17 → 6.93 s |
 | 3 questions, 15k-token state | 6.03 → 5.92 s | 21.4 → 19.7 s | 26.4 → 26.7 s |
 | 16 questions × up to 32 options, 0.9k-token state | 5.64 → 2.58 s | 21.6 → 5.77 s | 20.6 → 5.70 s |
-| Peak GPU memory, 15k-token state | 3.1 → 3.1 GB | 11.1 → 13.3 GB | 8.2 → 10.0 GB |
+| Peak GPU memory, 15k-token state, as first released | 3.1 → 3.1 GB | 11.1 → 13.3 GB | 8.2 → 10.0 GB |
+| Peak GPU memory, 0.8k / 15k-token state, with the 2026-10-05 memory fixes | 2.4 / 3.1 GB | 8.8 / 10.2 GB | 5.9 / 7.3 GB |
 
 Accuracy on the five benchmarks is unchanged within noise (12 of 2,666 answers change on the 9B, 28 on the 2B, all
-near ties; `docs/RESULTS.md` §16). The 9B's longer states cost more memory because the question pass copies the state
-cache once per question. On another GPU, run `scripts/tune_kernels.py --ckpt <checkpoint>` once; without it the int8
-layers keep the previous kernels.
+near ties; `docs/RESULTS.md` §16). The memory fixes of 2026-10-05: the question pass reads one shared copy of the state
+cache instead of one per question, and the 9B releases store the embedding table and LM head as Q4_0 blocks (0.83 GB
+less; on the 9B 19 of 2,666 answers change, on the 2B too many, so it keeps int8). The 4-bit 9B now needs 7.3 GB at
+15k tokens, 2.4 GB over its weights (§16.5). On another GPU, run `scripts/tune_kernels.py --ckpt <checkpoint>` once;
+without it the int8 layers keep the previous kernels.
 
 ### typed-decisions (secondary: agreement with a teacher model)
 
@@ -222,13 +225,19 @@ agreement with that teacher, not correctness. The card lists the teacher's agree
 Leaderboard rows are from the dataset card (read 2026-09-28). The clean-provenance 9B scores below the previous release
 (0.643), which trained on SNLI and BoolQ; we report the drop and do not train on this benchmark to recover it.
 
+### Behavioral probes
+
+60 items (`eval/probes.py`, `docs/RESULTS.md` §18): both models are deterministic over 50 repeated calls; an irrelevant
+extra option takes 0.008 (9B) / 0.025 (2B) of the probability; a duplicated option splits its probability evenly
+between the copies; rewording all labels at the same meaning moves the distribution by TV 0.068 (9B) / 0.113 (2B),
+half of the previous 2B release (0.238).
+
 ### Explanations and prefix cache
 
-Measured on the previous 2B release (same architecture and backbone); not re-measured for this release.
-
-- Explanations (`/v1/explain`, 24 cases): the decision is recovered from the explanation alone, option names masked,
-  79% of the time (29% with a mismatched explanation). About 8 s per explanation on the Orin (2B), 25 s (9B).
-- Prefix cache: a state that grows by one record costs 0.83 s instead of 0.98 s at 0.9k tokens and 1.69 s instead of
+- Explanations (`/v1/explain`, 24 cases, this release): read alone with option names masked, the explanation lets the
+  decision model recover the decision 92% of the time on the 9B (46% with a mismatched explanation) and 79% on the 2B
+  (38%). About 13 s (2B) and 40 s (9B) per explanation on the Orin in 50 W mode.
+- Prefix cache (previous 2B release, not re-measured): a state that grows by one record costs 0.83 s instead of 0.98 s at 0.9k tokens and 1.69 s instead of
   6.01 s at 15k; the top answer matched the uncached path on every question.
 
 ## How we measure, and why
@@ -312,7 +321,7 @@ Design notes: [`docs/roadmap_designs.md`](docs/roadmap_designs.md),
 | | Minimum | Tested |
 |---|---|---|
 | GPU memory, 2B | 2.4 GB for states up to about 1k tokens, 3.1 GB up to 15k (int8 weights); 1.8 / 2.5 GB with 4-bit weights | Jetson AGX Orin 64 GB |
-| GPU memory, 9B | 9.9 GB for states up to about 1k tokens, 13.3 GB up to 15k (int8 weights, serving path) | Jetson AGX Orin 64 GB |
+| GPU memory, 9B | 8.8 GB for states up to about 1k tokens, 10.2 GB up to 15k (int8 layers, Q4_0 tables); 4-bit (`opendecider-9b-awq`): 5.9 / 7.3 GB | Jetson AGX Orin 64 GB |
 | Host RAM | 12 GB peak while loading the 2B backbone | same |
 | Disk | 2B: 4.3 GB backbone + 0.1 GB checkpoint; 9B: 5.2 GB Q4_0 GGUF + 0.1 GB checkpoint; Python environment about 6 GB | same |
 | Python | 3.12 | 3.12 on aarch64 (JetPack) |
@@ -437,7 +446,9 @@ Environment variables:
   19.7 s at 15k tokens). TypeSafe reports 70 to 500 ms for Jev
   ([launch post](https://typesafe.ai/blog/introducing-system-one-models-and-jev)), measured by TypeSafe near its own
   servers on hardware it has not disclosed; ours is on one edge device, so the two are not directly comparable.
-- Explanations take about 8 s (2B) and 25 s (9B) on the Orin and can contain small factual slips.
+- Explanations take about 13 s (2B) and 40 s (9B) on the Orin (50 W mode) and can contain small factual slips.
+- On the 2B, the smallest requests (2 to 8 options, 1 to 4 questions) are up to 0.15 s slower on the serving path than
+  before (fused-kernel launch overhead; `docs/RESULTS.md` §16.6).
 - The prefix cache matches the uncached path to within 0.007 to 0.026 in probability (int8 cache boundaries), not
   bit-exactly.
 - There is no Jev API access. All Jev numbers come from TypeSafe or third parties.
@@ -446,7 +457,7 @@ Environment variables:
 
 | Area | Status |
 |---|---|
-| Explanation quality and prefix-cache equivalence on the new checkpoints | Planned. Current numbers are from the previous release. |
+| Prefix-cache equivalence on the new checkpoints | Planned. Current numbers are from the previous release (explanations were re-measured, `docs/RESULTS.md` §18.3). |
 | W8A8 without the accuracy loss (SmoothQuant-style calibration) | Planned. W8A8 was 2.5x faster on the 9B at 0.8k tokens but lost 5 to 6 points (`docs/RESULTS.md` §12). |
 | GPUs other than the Jetson AGX Orin | Not measured. `scripts/tune_kernels.py` prepares the fused kernels on any CUDA GPU; all memory and latency numbers are from one Orin 64 GB. |
 | GPU tests in CI | Planned. Unit tests run on CPU with a tiny random model; one GPU test covers the fused attention path. |
