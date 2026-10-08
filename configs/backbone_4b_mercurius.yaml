@@ -1,0 +1,17 @@
+# Mercurius-1-4B (Minerva Laboratories; Qwen3.5-4B rebuilt with KDA/GDN-2 linear attention, absorbed MLA with a
+# decoupled RoPE key, distilled, 4-bit QAT) in its deployed form (src/opendecider/mercurius_port.py): NF4 merged
+# weights, factored bf16 gates, NF4 embedding table, TurboQuant 4-bit KV cache holding the latent codes
+# (src/opendecider/mercurius_cache.py). Rebuilt with Mercurius's own build() from:
+#   weights  Minerva-Laboratories/Mercurius-1-4B @ 9a3e1cfff25b (private)
+#   code     Mercurius branch gb10-4b-27b @ 62966e4, MERCURIUS_CODE=/mnt/ext/opendecider/code/mercurius
+#   base     Qwen/Qwen3.5-4B @ 851bf6e806ef (stage A+B conversion: ckpt/qwen3.5-4b-stageAB)
+path: /mnt/ext/opendecider/mercurius-work     # Mercurius working root (ckpt/, cache/): rebuilt by its build()
+repo_id: Minerva-Laboratories/Mercurius-1-4B
+revision: 9a3e1cfff25b
+dtype: bfloat16
+weight_quant: mercurius
+kv_quant: int8
+quantize_linear_state: false
+feature_layers: [8, 16, 24, final]
+prefill_chunk: 4096                # state pass in 4k slices (also the loader's default for Mercurius)
+device: cuda

@@ -85,6 +85,11 @@ def main():
         print(ev.table(sort_by="self_cpu_time_total", row_limit=18, max_name_column_width=60))
         if a.stacks:
             print("\n== copy_/mul by call site (top 12)")
+            shp = [e for e in prof.key_averages(group_by_input_shape=True) if e.key in ("aten::copy_", "aten::to", "aten::add")]
+            shp.sort(key=lambda e: -e.self_cpu_time_total)
+            print("== copy_/to/add by input shape (top 15)")
+            for e in shp[:15]:
+                print(f"  {e.key:12s} {e.self_cpu_time_total / 1e6:8.2f}s  x{e.count:6d}  {str(e.input_shapes)[:150]}")
             print(prof.key_averages(group_by_stack_n=6).table(sort_by="self_cpu_time_total", row_limit=12,
                                                                max_name_column_width=40, max_src_column_width=110))
         if a.trace:

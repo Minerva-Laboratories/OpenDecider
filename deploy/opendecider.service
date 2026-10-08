@@ -1,0 +1,13 @@
+[Unit]
+Description=OpenDecider decision API on the local network (python -m opendecider.serve)
+After=network-online.target
+
+[Service]
+EnvironmentFile=-%h/.config/opendecider/server.env
+ExecStart=@REPO@/deploy/serve_lan.sh
+Restart=on-failure
+RestartSec=10
+Nice=5
+
+[Install]
+WantedBy=default.target

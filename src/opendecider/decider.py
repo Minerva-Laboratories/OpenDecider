@@ -187,7 +187,7 @@ class Decider:
         """Stage 1 (O2): independent sigmoid relevance in chunks of <=255."""
         scores = []
         for s in range(0, len(q.options), MAX_OPTIONS):
-            chunk = Question(q.prompt, q.options[s:s + MAX_OPTIONS], q.type, name=q.name)
+            chunk = Question(q.prompt, q.options[s:s + MAX_OPTIONS], q.type, name=q.name, state_idx=q.state_idx)
             _, out = self.model.run([chunk], mem)
             scores.append(out.relevance[0, : len(chunk.options)])
         return torch.cat(scores)
@@ -217,7 +217,7 @@ class Decider:
         answers, n_tok = {}, 0
         for q in large:                                     # two-stage (O2)
             keep = two_stage_select(self._relevance(q, mem)).tolist()
-            sub = Question(q.prompt, [q.options[i] for i in keep], q.type, name=q.name)
+            sub = Question(q.prompt, [q.options[i] for i in keep], q.type, name=q.name, state_idx=q.state_idx)
             sub.orig_index = keep
             small.append(sub)
             n_tok += sum(len(t) for t in self.model.backbone.tokenize([q.prompt] + q.options))
@@ -338,6 +338,60 @@ class Decider:
                               "total": 1e3 * (t_end - t0), "waves": len(plan)},
                 "state_cached_tokens": n_cached,
                 "input_tokens": mem.n_tokens + n_tok}
+
+    def decide_many(self, reqs: list) -> list[dict]:
+        """Several independent requests in one batch: ONE left-padded state pass over all their states (the
+        cross-request prefix cache is not used here) and, per dependency wave, ONE row pass over all their
+        questions, each question reading its own request's state (state_idx). Requests must share the sampler and
+        conformal settings (the server groups them); each still gets only its own answers. Equals decide() per
+        request up to batched-kernel rounding."""
+        reqs = [DecideRequest.model_validate(r) if isinstance(r, dict) else r for r in reqs]
+        if len(reqs) == 1:
+            return [self.decide(reqs[0])]
+        key = {(r.sampler.mode, r.sampler.k, None if r.conformal is None else (r.conformal.alpha, r.conformal.method))
+               for r in reqs}
+        if len(key) > 1:
+            raise ValueError("decide_many: requests must share sampler and conformal settings")
+        t0 = time.perf_counter()
+        sync = torch.cuda.synchronize if torch.cuda.is_available() else (lambda: None)
+        r0 = reqs[0]
+        sampler = SamplerConfig(mode=r0.sampler.mode if r0.sampler.k > 1 else "off", k=r0.sampler.k)
+        texts = [self._context_prefix(r) + state_texts([r.state])[0] for r in reqs]
+        mem = self.model.encode_states(texts)
+        n_state = [len(t) for t in self.model.backbone.tokenize(texts)]
+        sync(); t_state = time.perf_counter()
+        answers = [{} for _ in reqs]
+        n_tok = [0] * len(reqs)
+        plans = [waves(r.questions) for r in reqs]
+        for w in range(max(map(len, plans))):
+            batch, owner = [], []
+            for i, (r, plan) in enumerate(zip(reqs, plans)):
+                for name in (plan[w] if w < len(plan) else []):
+                    spec = r.questions[name]
+                    parts = ([(f"{name}.{pn}", ps) for pn, ps in spec.parts.items()] if spec.type == "composite"
+                             else [(name, spec)])
+                    for qn, ps in parts:
+                        q = self._atomic(f"{i}\x1f{qn}", ps, answers[i])
+                        q.state_idx = i
+                        batch.append(q)
+                        owner.append(i)
+            if not batch:
+                continue
+            got, _ = self._answer_batch(batch, mem, sampler, r0.conformal)
+            for q, i in zip(batch, owner):
+                n_tok[i] += sum(len(t) for t in self.model.backbone.tokenize([q.prompt] + q.options))
+            for i, (r, plan) in enumerate(zip(reqs, plans)):
+                for name in (plan[w] if w < len(plan) else []):
+                    spec = r.questions[name]
+                    if spec.type == "composite":
+                        answers[i][name] = self._combine(spec, {pn: got[f"{i}\x1f{name}.{pn}"] for pn in spec.parts})
+                    else:
+                        answers[i][name] = got[f"{i}\x1f{name}"]
+        sync(); t_end = time.perf_counter()
+        timing = {"state": 1e3 * (t_state - t0), "questions": 1e3 * (t_end - t_state), "total": 1e3 * (t_end - t0),
+                  "waves": max(map(len, plans)), "batch": len(reqs)}
+        return [{"answers": {k: answers[i][k] for k in r.questions}, "timing_ms": dict(timing),
+                 "state_cached_tokens": 0, "input_tokens": n_state[i] + n_tok[i]} for i, r in enumerate(reqs)]
 
 
 def composite_feature(f: str, parts: dict) -> float:

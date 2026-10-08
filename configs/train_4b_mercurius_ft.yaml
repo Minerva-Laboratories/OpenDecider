@@ -1,0 +1,74 @@
+# OpenDecider 4B (Mercurius-1-4B): the clean 2B head stitched onto this backbone (scripts/stitch_backbone.py), then fine-tuned
+# parameter-efficiently: the backbone stays frozen with no adapters; LoRA (rank 16) on the head's Linear layers only
+# (src/opendecider/head_lora.py). Same clean corpus as the 9B recipe (configs/train_9b_clean.yaml); 16 states per step
+# (frozen backbone, so one pass), 500 steps, best checkpoint by validation cross-entropy (step 0 included).
+# Paired with the other 4B config (configs/train_4b_nf4_ft.yaml / train_4b_mercurius_ft.yaml) for the Mercurius test.
+backbone: configs/backbone_4b_mercurius.yaml
+model:
+  variant: v3
+  d_model: 512
+  n_heads: 8
+  decision_layers: 4
+  slot_emb: none
+  dropout: 0.1
+  v3_features: branched
+  v3_cross: question
+  v3_row_format: answer
+  v3_lm_feature: true
+  v3_row_checkpoint: true          # recompute option-row chunks in backward
+  v3_vera_layers: 0                # no backbone adapters
+  v3_layer_combine: stitch         # ridge map from 4 4B layers into the 2B trunk space
+  v3_stitch_dim: 2048
+train:
+  # clean corpus (data/MANIFEST.md); weights = sampling probability per file
+  data:
+    - data/synthetic/train.jsonl                    # 0.14  programmatic synthetic tasks
+    - data/clean_train/kept_public_train.jsonl      # 0.15  clinc, massive, winogrande
+    - data/clean_train/topics_train.jsonl           # 0.08  LEDGAR, arXiv
+    - data/clean_train/reading_train.jsonl          # 0.10  CUAD, CSQA2, RuleTaker, HANS
+    - data/clean_train/knowledge_train.jsonl        # 0.06  CODAH, Balanced-COPA, AQuA-RAT, CaseHOLD
+    - data/clean_train/kept_knowledge_train.jsonl   # 0.06  QASC, CosmosQA, QuaRTz, StrategyQA
+    - data/clean_train/kept_injection_train.jsonl   # 0.02  Gandalf
+    - data/clean_train/injection_train.jsonl        # 0.08  TrustAIRLab, LLMail, OASST1 negatives
+    - data/clean_train/harmful_train.jsonl          # 0.02  XSTest, JBB-Behaviors
+    - data/clean_train/ordinal_train.jsonl          # 0.05  Civil Comments, OASST1 ratings
+    - data/clean_train/kept_context_train.jsonl     # 0.09  in-context items (clinc, massive)
+    - data/synthetic/uncertainty_train.jsonl        # 0.06  unknowable / buried states
+    - data/clean_train/injgen_train.jsonl           # 0.04  generated attacks, blunt
+    - data/clean_train/injgen2_train.jsonl          # 0.05  generated attacks, subtle
+  data_weights: [0.14, 0.15, 0.08, 0.10, 0.06, 0.06, 0.02, 0.08, 0.02, 0.05, 0.09, 0.06, 0.04, 0.05]
+  val: [data/synthetic/val.jsonl, data/clean_train/kept_public_val.jsonl, data/clean_train/topics_val.jsonl,
+        data/clean_train/reading_val.jsonl, data/clean_train/knowledge_val.jsonl, data/clean_train/kept_injection_val.jsonl,
+        data/clean_train/injection_val.jsonl, data/clean_train/ordinal_val.jsonl, data/clean_train/injgen_val.jsonl,
+        data/clean_train/injgen2_val.jsonl]
+  calib: [data/synthetic/calib.jsonl, data/clean_train/kept_public_calib.jsonl, data/clean_train/topics_calib.jsonl,
+          data/clean_train/reading_calib.jsonl, data/clean_train/knowledge_calib.jsonl,
+          data/clean_train/kept_knowledge_calib.jsonl, data/clean_train/kept_injection_calib.jsonl,
+          data/clean_train/injection_calib.jsonl, data/clean_train/harmful_calib.jsonl, data/clean_train/ordinal_calib.jsonl,
+          data/clean_train/injgen_calib.jsonl, data/clean_train/injgen2_calib.jsonl]
+  init_from: runs/x2b-clean3-stitch-mercurius-deployed/model.pt   # warm start (never from a head trained on share-alike data)
+  seed: 0
+  max_steps: 500
+  lr: 1.0e-4
+  head_lora_rank: 16               # LoRA on the head only; merged into the weights at save
+  head_lora_alpha: 32
+  keep_best: true                  # eval at step 0 too; finish with the best val_ce state
+  warmup: 50
+  states_per_step: 16
+  grad_accum: 1
+  max_questions_per_state: 4
+  max_state_tokens: 768
+  max_train_options: 16
+  tokens_per_microbatch: 8000
+  option_wrap_p: 0.3
+  consistency_weight: 0.5
+  consistency_pairs: 1
+  consistency_options: 8
+  none_p: 0.3
+  none_drop_p: 0.25
+  backbone_weight_quant: null
+  max_oom_skips: 30                # skip (and log) up to 30 steps whose batch runs out of GPU memory
+  max_gpu_gb: 34
+  eval_every: 100
+  eval_states: 800
+  save_every: 100

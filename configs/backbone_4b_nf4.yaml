@@ -1,0 +1,10 @@
+# Qwen3.5-4B with NF4 weights (bitsandbytes): the same-size, same-precision baseline for Mercurius-1-4B.
+path: /mnt/ext/opendecider/models/Qwen__Qwen3.5-4B@851bf6e806ef
+repo_id: Qwen/Qwen3.5-4B
+revision: 851bf6e806ef
+dtype: bfloat16
+weight_quant: nf4
+kv_quant: int8
+quantize_linear_state: false
+feature_layers: [8, 16, 24, final]
+device: cuda

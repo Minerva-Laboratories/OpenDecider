@@ -15,6 +15,9 @@ gguf = ["gguf>=0.19"]                               # 9B backbone from the Q4_0 
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+opendecider = ["static/*.html"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src", "."]

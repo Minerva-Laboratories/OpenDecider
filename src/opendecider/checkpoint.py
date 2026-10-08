@@ -12,7 +12,8 @@ from .models import ModelConfig, build_model
 
 
 def save(model, path: str, extra: dict | None = None) -> None:
-    sd = {k: v.detach().cpu() for k, v in model.trainable_state_dict().items()}
+    from .head_lora import merged_state_dict
+    sd = {k: v.detach().cpu() for k, v in merged_state_dict(model).items()}   # LoRA (if any) folded into the head
     size_gb = sum(v.numel() * v.element_size() for v in sd.values()) / 2**30
     require_free_gb(size_gb * 1.1 + 0.05)
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)

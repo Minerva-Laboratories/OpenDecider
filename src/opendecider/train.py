@@ -54,6 +54,9 @@ DEFAULT_TRAIN = dict(
     none_drop_p=0.0,                # given `none`, prob. the gold option is removed and `none` becomes the target
     conformal=True,                 # store split-conformal scores of the calib split in the checkpoint
     materialize_weights=False,      # true: all; a number: GB budget for the extra bf16 bytes
+    head_lora_rank=0,               # >0: freeze the head and train LoRA of this rank on its Linear layers (head_lora.py)
+    keep_best=False,                # evaluate at step 0 too and finish with the trainable state of the best val_ce
+    head_lora_alpha=None,           # LoRA scale alpha / rank (default alpha = 2 * rank)
     resume=False,
     max_oom_skips=0)                # >0: skip up to this many steps whose batch runs out of GPU memory (logged)                   # continue exactly from runs/<name>/train_state.pt (written at every save)      # int8 backbone: expand the deployed weights to bf16 once (same numbers, faster)
 
@@ -501,6 +504,10 @@ def main(argv=None):
             checkpoint_backbone_layers(bb)
         model = build_model(bb, ModelConfig(**cfg["model"])).to(bb.device)
         init = warm_start(model, t["init_from"]) if t.get("init_from") else None
+        if t.get("head_lora_rank"):                 # parameter-efficient: LoRA on the head only (head_lora.py)
+            from .head_lora import add_head_lora_
+            hl = add_head_lora_(model, int(t["head_lora_rank"]), float(t.get("head_lora_alpha") or 2 * t["head_lora_rank"]))
+            print(f"[train] head LoRA r={hl.rank}: {len(hl.targets)} Linear layers, trained fully: {hl.full}", flush=True)
         n_train = sum(p.numel() for p in model.trainable_parameters())
         meta = {"config": cfg, "git": git_rev(), "trainable_params": n_train, "torch": torch.__version__, "init": init,
                 "argv": sys.argv, "started": time.strftime("%Y-%m-%d %H:%M:%S")}
@@ -543,6 +550,14 @@ def main(argv=None):
             start = st["step"] + 1
             print(f"[train] resumed from {state_path} at step {st['step']}", flush=True)
         log = open(os.path.join(out, "log.jsonl"), "a")
+        best = None
+        if t.get("keep_best") and val:
+            # the starting point counts: a fine-tune never ends below its warm start
+            ev = evaluate(model, val, t); ev["step"] = start - 1
+            log.write(json.dumps(ev) + "\n"); log.flush()
+            print(f"[eval] step {start - 1} {ev}", flush=True)
+            best = (ev["val_ce"], start - 1, {n: p.detach().cpu().clone() for n, p in model.named_parameters()
+                                              if p.requires_grad})
         model.train()
         t0 = time.time()
         oom_skips = 0
@@ -588,6 +603,9 @@ def main(argv=None):
                 ev = evaluate(model, val, t); ev["step"] = step
                 log.write(json.dumps(ev) + "\n"); log.flush()
                 print(f"[eval] step {step} {ev}", flush=True)
+                if best is not None and ev["val_ce"] < best[0]:
+                    best = (ev["val_ce"], step, {n: p.detach().cpu().clone() for n, p in model.named_parameters()
+                                                 if p.requires_grad})
             if step % t["save_every"] == 0 or step == t["max_steps"]:
                 save(model, os.path.join(out, "model.pt"), {"step": step})
                 torch.save({"step": step, "model": model.trainable_state_dict(), "opt": opt.state_dict(),
@@ -596,6 +614,13 @@ def main(argv=None):
                            state_path + ".tmp")
                 os.replace(state_path + ".tmp", state_path)        # atomic: a kill mid-write keeps the old state
         extra = {"step": t["max_steps"], "temperature": 1.0}
+        if best is not None:                         # restore the best validated trainable state, then calibrate it
+            with torch.no_grad():
+                for n, p in model.named_parameters():
+                    if n in best[2]:
+                        p.copy_(best[2][n].to(p.device))
+            extra.update(best_step=best[1], best_val_ce=best[0])
+            print(f"[train] keep_best: step {best[1]} (val_ce {best[0]:.4f})", flush=True)
         calibs = [t["calib"]] if isinstance(t["calib"], str) else (t["calib"] or [])
         calib = [r for f in calibs if os.path.exists(f) for r in keep(load_jsonl(f))[: max(1, t["eval_states"] // max(1, len(calibs)))]]
         if calib:

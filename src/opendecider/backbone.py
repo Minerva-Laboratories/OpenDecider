@@ -27,13 +27,14 @@ class BackboneConfig:
     revision: str = "2fc06364715b967f1860aea9cf38778875588b17"
     dtype: str = "bfloat16"
     weight_quant: str = "int8"          # none | int8 | nf4 (bitsandbytes) | w4 | w8 | a8w8 | awq4 (GemLite Triton GEMMs)
+                                        # | mercurius (path = Mercurius working root; mercurius_port.py)
     kv_quant: str = "int8"              # none | int8 | int4  (all cached K/V and state memory)
     table_quant: str = "int8"           # embedding table and LM head when weights are quantized: int8 | q4 (Q4_0 blocks)
     quantize_linear_state: bool = False  # GDN recurrent/conv state (not a KV cache)
     feature_layers: list = field(default_factory=lambda: ["final"])  # "final" = post-norm last layer, or ints 1..L
     awq_path: str = ""                  # weight_quant=awq4: calibrated scales (scripts/awq_calibrate.py)
-    prefill_chunk: int = 0              # state pass in chunks of this many tokens; 0 = one pass (measured: no peak
-                                        # memory gain on the Orin, +34% latency at 15k tokens)
+    prefill_chunk: int = 0              # state pass in chunks of this many tokens; 0 = one pass. Qwen 4B NF4 at 15k
+                                        # (Orin): 4096 -> peak 4.78 -> 3.51 GB, latency +27%. Mercurius defaults to 4096
     device: str = "cuda"
 
     @classmethod
@@ -72,6 +73,11 @@ class Backbone(nn.Module):
         self.num_layers = c.num_hidden_layers
         self.layer_types = list(getattr(c, "layer_types", ["full_attention"] * self.num_layers))
         self.pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
+        # prefix_attn re-implements Qwen3.5's attention math; backbones with other attention (Mercurius's MLA) run
+        # rows through their own attention on a per-row cache instead
+        self.supports_shared_prefix = True
+        # which shared-prefix attention the rows use: prefix_attn (Qwen3.5 attention) or the absorbed MLA one
+        self.shared_prefix_kind = "mercurius" if cfg.weight_quant == "mercurius" else "qwen"
 
     # ------------------------------------------------------------------ construction
     @classmethod
@@ -83,6 +89,12 @@ class Backbone(nn.Module):
             kw["quantization_config"] = BitsAndBytesConfig(
                 load_in_4bit=True, bnb_4bit_quant_type="nf4", bnb_4bit_use_double_quant=True,
                 bnb_4bit_compute_dtype=dtype)
+        if cfg.weight_quant == "mercurius":                    # Mercurius-1-4B in its deployed form (mercurius_port):
+            from .mercurius_port import load_deployed         # NF4 weights, factored gates, NF4 embedding table,
+            lm, tok = load_deployed(cfg.path)                 # TurboQuant 4-bit KV cache of latent codes
+            if not cfg.prefill_chunk:                         # GDN-2's chunk-parallel prefill temporaries grow with
+                cfg.prefill_chunk = 4096                      # length; 4k slices: 15k peak 5.09 -> 3.22 GB, latency
+            return cls(lm, tok, cfg, None)                    # +1% (Orin). Tied head: the NF4 embedding table
         from .ct_load import is_compressed_tensors
         if is_compressed_tensors(cfg.path):                   # pre-quantized AWQ (llm-compressor, see ct_load.py)
             from .ct_load import load_qwen35_ct
@@ -252,6 +264,9 @@ class Backbone(nn.Module):
             prev[i] = cache.layers[i].conv_states[0]
             handles += [la.in_proj_a.register_forward_hook(neg), la.in_proj_b.register_forward_hook(neg),
                         la.in_proj_qkv.register_forward_hook(lambda mod, args, out, i=i: inputs.__setitem__(i, out))]
+            for gate in ("in_proj_be", "in_proj_bw"):          # GDN-2 (Mercurius): channel-wise write gates
+                if hasattr(la, gate):
+                    handles.append(getattr(la, gate).register_forward_hook(neg))
         try:
             yield
         finally:
@@ -335,6 +350,8 @@ class Backbone(nn.Module):
 # ---------------------------------------------------------------------- packed cache
 _KV_ATTRS = ("keys", "values")
 _STATE_ATTRS = ("conv_states", "recurrent_states")
+# Mercurius's compressed attention cache (mercurius_cache.LatentCodesLayer): already 4-bit codes, stored as they are
+_CODE_ATTRS = ("lat_codes", "lat_norm", "rope_codes", "rope_norm", "inv_r", "pos")
 
 
 def _assign_recurrent(self, recurrent_states, state_idx: int = 0, **kw):
@@ -358,7 +375,8 @@ def _assign_conv(self, conv_states, state_idx: int = 0, conv_kernel_size=None, *
             full = torch.nn.functional.pad(full, (k - full.shape[-1], 0), value=0)
     else:
         full = torch.cat([self.conv_states[state_idx], conv_states], dim=-1)
-    self.conv_states[state_idx] = full[..., -self.conv_kernel_size[state_idx]:]
+    # a copy, not a view: a view of `full` would pin every row's whole conv input for the cache's lifetime
+    self.conv_states[state_idx] = full[..., -self.conv_kernel_size[state_idx]:].clone()
     return full.transpose(1, 2).contiguous().transpose(1, 2)
 
 
@@ -398,6 +416,11 @@ class PackedCache:
                 if kv and isinstance(t, torch.Tensor) and t.numel():
                     tensors[(li, a, None)] = maybe_quantize(t, kv_int8)
                     setattr(shell, a, None)
+            for a in _CODE_ATTRS:
+                t = getattr(layer, a, None)
+                if isinstance(t, torch.Tensor):
+                    tensors[(li, a, None)] = t
+                    setattr(shell, a, None)
             for a in _STATE_ATTRS:
                 d = getattr(layer, a, None)
                 if isinstance(d, dict):
@@ -433,7 +456,8 @@ class PackedCache:
                 getattr(cache.layers[li], a)[k] = x
         return cache
 
-    def unpack_rows(self, rows: torch.Tensor, autograd_safe: bool = True, attn_placeholder: bool = False):
+    def unpack_rows(self, rows: torch.Tensor, autograd_safe: bool = True, attn_placeholder: bool = False,
+                    lazy_states: bool = False):
         """Fresh cache whose batch row i is the packed row `rows[i]` (one gather per tensor).
 
         autograd_safe: transformers updates GDN conv/recurrent states IN PLACE (copy_), which breaks backward when
@@ -452,6 +476,12 @@ class PackedCache:
                 if isinstance(getattr(l, a, None), dict):
                     setattr(l, a, dict(getattr(l, a)))
         for (li, a, k), t in self.tensors.items():
+            if lazy_states and a in _STATE_ATTRS:              # per layer, on use (row_states)
+                continue
+            if attn_placeholder and a in _CODE_ATTRS:         # mercurius: rows read the once-decoded state instead
+                if a == "pos":                                # only its shape is used (get_seq_length)
+                    setattr(cache.layers[li], a, torch.zeros((), dtype=t.dtype, device=t.device).expand(rows.numel(), t.shape[1]))
+                continue
             if attn_placeholder and a in _KV_ATTRS:           # shared-prefix attention reads K/V itself (prefix_attn)
                 sh = (rows.numel(), *t.shape[1:])
                 dev = t.q.device if isinstance(t, Int8Tensor) else t.device
@@ -466,6 +496,50 @@ class PackedCache:
             else:
                 getattr(cache.layers[li], a)[k] = x.contiguous()
         return cache
+
+    @contextlib.contextmanager
+    def row_states(self, bb, cache, rows: torch.Tensor):
+        """For a cache from unpack_rows(lazy_states=True) whose rows are TERMINAL (never continued): each linear-attention
+        layer gets its rows' recurrent/conv states just before it runs and drops them right after, so one layer's
+        per-row states exist at a time instead of all layers' for the whole pass."""
+        by_layer: dict = {}
+        for (li, a, k), t in self.tensors.items():
+            if a in _STATE_ATTRS:
+                by_layer.setdefault(li, []).append((a, k, t))
+
+        def pre(li):
+            def f(mod, args, kwargs=None):
+                layer = cache.layers[li]
+                for a, k, t in by_layer[li]:
+                    if isinstance(t, Int8Tensor):
+                        x = t.index_select(0, rows.to(t.q.device)).dequantize()
+                    else:
+                        x = t.index_select(0, rows.to(t.device))
+                    if k is None:
+                        setattr(layer, a, x.contiguous())
+                    else:
+                        getattr(layer, a)[k] = x.contiguous()
+            return f
+
+        def post(li):
+            def f(mod, args, out):
+                layer = cache.layers[li]
+                for a, k, _ in by_layer[li]:
+                    if k is None:
+                        setattr(layer, a, None)
+                    else:
+                        getattr(layer, a)[k] = None
+            return f
+
+        handles = []
+        for li in by_layer:
+            m = bb.lm.layers[li].linear_attn
+            handles += [m.register_forward_pre_hook(pre(li)), m.register_forward_hook(post(li))]
+        try:
+            yield
+        finally:
+            for h in handles:
+                h.remove()
 
     def nbytes(self) -> int:
         n = 0

@@ -270,7 +270,7 @@ class V3(DecisionModel):
         on itself, so the recompute sees the same inputs and adapters as the forward (peak = state graph + 1 chunk)."""
         bb, vera = self.backbone, getattr(self, "vera", None)
 
-        shared = self.cfg.v3_shared_prefix
+        shared = self.cfg.v3_shared_prefix and self.backbone.supports_shared_prefix
 
         def run(ids, mask):
             prev = vera.active if vera is not None else None
@@ -278,12 +278,21 @@ class V3(DecisionModel):
                 vera.active = True
             try:
                 # prefix: two-level question-cache prefix (state cache + each question's own K/V, see qcache)
-                attn = shared_prefix_attention(bb, prefix["pc"], rows, smask, q_kv=prefix["q_kv"],
-                                               q_state=prefix["q_state"]) if prefix else \
-                    shared_prefix_attention(bb, pc, rows, smask) if shared else contextlib.nullcontext()
-                with attn:
+                if prefix:
+                    attn = shared_prefix_attention(bb, prefix["pc"], rows, smask, q_kv=prefix["q_kv"],
+                                                   q_state=prefix["q_state"])
+                elif shared and bb.shared_prefix_kind == "mercurius":
+                    from .mercurius_cache import merc_shared_prefix_attention
+                    attn = merc_shared_prefix_attention(bb, pc, rows, smask)
+                elif shared:
+                    attn = shared_prefix_attention(bb, pc, rows, smask)
+                else:
+                    attn = contextlib.nullcontext()
+                cache = pc.unpack_rows(rows, attn_placeholder=shared, lazy_states=True)
+                cache.terminal = True                       # rows are never continued: no final recurrent states
+                with attn, pc.row_states(bb, cache, rows):  # one layer's per-row GDN states alive at a time
                     f, _ = bb(ids, mask, layers=bb.cfg.feature_layers,
-                              past_key_values=pc.unpack_rows(rows, attn_placeholder=shared),
+                              past_key_values=cache,
                               use_cache=True, past_mask=smask.index_select(0, rows), position_ids=position_ids)
                 return self._wide(f)
             finally:
@@ -476,7 +485,7 @@ class V3(DecisionModel):
                 sg = sidx[gi].to(dev)
                 Lg = int(lq[gi].max())
                 gmask = qmask[gi, :Lg].to(dev)
-                shared = self.cfg.v3_shared_prefix and not grad
+                shared = self.cfg.v3_shared_prefix and self.backbone.shared_prefix_kind == "qwen" and not grad   # Qwen attention only
                 cache = pc.unpack_rows(sg, attn_placeholder=shared)
                 padded = bool((lq[gi] < Lg).any())
                 cap = {} if shared else None

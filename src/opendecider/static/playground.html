@@ -1,0 +1,514 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OpenDecider Playground</title>
+<style>
+:root {
+  --bg: #f5f6f8; --panel: #ffffff; --ink: #15181c; --ink2: #48505a; --muted: #7a838e; --line: #dde1e6; --line2: #eceff2;
+  --accent: #1f5fbf; --accent-ink: #ffffff; --accent-soft: #e8effa; --bar-bg: #edf0f4;
+  --ok: #1b7a44; --ok-soft: #e5f4ec; --warn: #9a5b00; --warn-soft: #fbf1e1; --bad: #b3261e;
+  --radius: 8px; --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #101317; --panel: #181c21; --ink: #e7eaee; --ink2: #b3bbc5; --muted: #8a939e; --line: #2a3037; --line2: #22272d;
+    --accent: #6ea3f2; --accent-ink: #0d1520; --accent-soft: #1b2839; --bar-bg: #232931;
+    --ok: #5cc48a; --ok-soft: #15291e; --warn: #e3a54a; --warn-soft: #2c2213; --bad: #f08a80;
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body { background: var(--bg); color: var(--ink); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+button, input, select, textarea { font: inherit; color: inherit; }
+header { display: flex; align-items: center; gap: 12px; padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+header h1 { font-size: 15px; margin: 0; font-weight: 700; letter-spacing: -.01em; }
+header .info { color: var(--muted); font-size: 12px; flex: 1 1 200px; }
+header .key { display: flex; gap: 6px; align-items: center; }
+header .key input { width: 200px; max-width: 46vw; }
+main { display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr); gap: 16px; padding: 16px; max-width: 1360px; margin: 0 auto; align-items: start; }
+@media (max-width: 920px) { main { grid-template-columns: minmax(0, 1fr); } }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px; min-width: 0; }
+.col { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+h2 { font-size: 13px; margin: 0; font-weight: 650; }
+.sub { color: var(--muted); font-size: 12px; margin: 2px 0 12px; }
+.head { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; flex-wrap: wrap; }
+input[type=text], input[type=password], textarea, select {
+  width: 100%; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; outline: none;
+}
+input:focus, textarea:focus, select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+textarea { resize: vertical; min-height: 140px; line-height: 1.5; }
+.btn { border: 1px solid var(--line); background: var(--panel); border-radius: 6px; padding: 7px 12px; cursor: pointer; white-space: nowrap; }
+.btn:hover { border-color: var(--muted); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 650; padding: 9px 18px; }
+.btn.small { padding: 4px 9px; font-size: 12.5px; }
+.btn.ghost { border-color: transparent; background: transparent; color: var(--ink2); }
+.btn.ghost:hover { background: var(--bg); }
+.btn:disabled { opacity: .5; cursor: default; }
+.icon { border: 0; background: transparent; color: var(--muted); cursor: pointer; padding: 4px 6px; border-radius: 4px; font-size: 16px; line-height: 1; }
+.icon:hover { color: var(--ink); background: var(--bg); }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.seg button { border: 0; background: transparent; padding: 5px 11px; cursor: pointer; font-size: 12.5px; color: var(--ink2); }
+.seg button + button { border-left: 1px solid var(--line); }
+.seg button.on { background: var(--accent-soft); color: var(--ink); font-weight: 600; }
+.row { display: flex; gap: 8px; align-items: center; }
+.row > input { flex: 1 1 0; min-width: 0; }
+.fields .row { margin-bottom: 6px; align-items: flex-start; }
+.fields .row input:first-child { flex: 0 0 30%; min-width: 0; }
+.fields .row textarea.val { flex: 1 1 0; min-width: 0; min-height: 38px; resize: none; overflow-y: auto; }
+.q { border: 1px solid var(--line); border-radius: var(--radius); padding: 12px; margin-bottom: 10px; background: var(--panel); }
+.q .top { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+.q .num { color: var(--muted); font-size: 12px; font-weight: 600; min-width: 18px; }
+.q .types { flex: 1; }
+.q .prompt { font-size: 14.5px; font-weight: 500; }
+.opts { margin-top: 8px; }
+.opts .row { margin-bottom: 5px; }
+.opts .row .dot { width: 8px; height: 8px; border-radius: 50%; border: 2px solid var(--line); flex: 0 0 auto; }
+.opts .row .hint { flex: 0 1 45%; color: var(--ink2); }
+.hint-text { font-size: 12px; color: var(--muted); margin-top: 6px; }
+.more { margin-top: 8px; }
+.more summary { cursor: pointer; color: var(--muted); font-size: 12.5px; }
+.more .inner { margin-top: 8px; display: grid; gap: 8px; }
+.more label { font-size: 12px; color: var(--ink2); display: block; margin-bottom: 3px; }
+.check { display: flex; gap: 6px; align-items: center; font-size: 13px; color: var(--ink2); cursor: pointer; }
+.actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.actions .spacer { flex: 1; }
+.err { color: var(--bad); font-size: 13px; margin-top: 8px; white-space: pre-wrap; }
+.empty { color: var(--muted); padding: 28px 8px; text-align: center; }
+.timing { color: var(--muted); font-size: 12px; margin-bottom: 10px; }
+.ans { border: 1px solid var(--line); border-radius: var(--radius); padding: 12px; margin-bottom: 10px; }
+.ans .qtext { color: var(--ink2); font-size: 13px; margin-bottom: 6px; }
+.ans .verdict { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+.ans .value { font-size: 18px; font-weight: 700; letter-spacing: -.01em; }
+.ans .conf { font-size: 12px; color: var(--muted); }
+.badge { font-size: 11.5px; padding: 2px 8px; border-radius: 99px; background: var(--warn-soft); color: var(--warn); font-weight: 600; }
+.bar { display: grid; grid-template-columns: minmax(70px, 34%) 1fr 48px; gap: 8px; align-items: center; margin: 4px 0; font-size: 13px; }
+.bar .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink2); }
+.bar .track { height: 10px; background: var(--bar-bg); border-radius: 4px; overflow: hidden; }
+.bar .fill { display: block; height: 100%; background: var(--accent); border-radius: 0 4px 4px 0; min-width: 2px; }
+.bar .pct { text-align: right; font-variant-numeric: tabular-nums; color: var(--ink2); font-size: 12.5px; }
+.bar.top .name { color: var(--ink); font-weight: 650; }
+.bar.none .fill { background: var(--muted); }
+.fb { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line2); display: flex; gap: 6px; flex-wrap: wrap; align-items: center; font-size: 13px; }
+.fb .lbl { color: var(--muted); font-size: 12px; margin-right: 2px; }
+.fb select, .fb input { width: auto; flex: 1 1 140px; padding: 5px 8px; font-size: 13px; }
+.fb .saved { color: var(--ok); background: var(--ok-soft); padding: 3px 9px; border-radius: 99px; font-size: 12px; font-weight: 600; }
+.setups { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.setups select { width: auto; min-width: 160px; padding: 6px 8px; }
+.toast { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); background: var(--ink); color: var(--panel); padding: 8px 14px; border-radius: 6px; font-size: 13px; opacity: 0; transition: opacity .2s; pointer-events: none; }
+.toast.on { opacity: 1; }
+</style>
+</head>
+<body>
+<header>
+  <h1>OpenDecider</h1>
+  <div class="info" id="info">connecting…</div>
+  <div class="key"><input id="key" type="password" placeholder="API key" autocomplete="off" aria-label="API key"></div>
+</header>
+
+<main>
+  <div class="col">
+    <section class="card">
+      <div class="head">
+        <div><h2>Setup</h2><div class="sub">Start from an example or one of your saved setups.</div></div>
+        <div class="setups">
+          <select id="setupPick" aria-label="Load a setup"></select>
+          <button class="btn small" id="saveSetup">Save setup</button>
+          <button class="btn small ghost" id="delSetup" title="Delete this saved setup">Delete</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="head">
+        <div><h2>The case</h2><div class="sub">What the model reads: a message, a ticket, a record.</div></div>
+        <div class="seg" role="tablist" aria-label="Case format">
+          <button id="modeText" class="on">Text</button><button id="modeFields">Fields</button>
+        </div>
+      </div>
+      <div id="stateText"><textarea id="stateArea" placeholder="Paste the message, document or situation here…"></textarea></div>
+      <div id="stateFields" class="fields" hidden>
+        <div id="fieldRows"></div>
+        <button class="btn small" id="addField">+ Add field</button>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="head">
+        <div><h2>Questions</h2><div class="sub">Each question is answered on its own, with a probability for every option.</div></div>
+      </div>
+      <div id="qs"></div>
+      <div class="actions">
+        <button class="btn small" id="addQ">+ Add question</button>
+        <span class="spacer"></span>
+        <label class="check" title="Mark an answer as unsure when more than one option can't be ruled out">
+          <input type="checkbox" id="conformal"> Flag unsure answers</label>
+      </div>
+    </section>
+
+    <div class="actions">
+      <button class="btn primary" id="run">Decide</button>
+      <span class="hint-text">or Ctrl + Enter</span>
+      <span class="spacer"></span>
+      <button class="btn small ghost" id="copyApi" title="Copy this request as a curl command, to call the API from code">Copy as API request</button>
+    </div>
+    <div class="err" id="err"></div>
+  </div>
+
+  <section class="card" id="results">
+    <h2>Answers</h2>
+    <div class="sub">Tell it when it's right or wrong: corrections are saved and can be used to calibrate it.</div>
+    <div id="answers"><div class="empty">Fill in a case and some questions, then press Decide.</div></div>
+  </section>
+</main>
+<div class="toast" id="toast"></div>
+
+<script>
+const TYPES = [["choice", "Pick one"], ["noul", "Yes / No"], ["score", "Rating scale"]];
+const EXAMPLES = {
+  "Support ticket": {
+    mode: "fields",
+    fields: [["Customer", "Ana Ruiz (Pro plan)"], ["Message", "I was charged twice for my March invoice and want my money back. This is the second time this happens."]],
+    questions: [
+      {type: "choice", prompt: "Which team should handle this?", options: [["billing", ""], ["technical", ""], ["refund", "customer asks for money back"], ["other", ""]]},
+      {type: "noul", prompt: "Does this need a reply within the hour?"},
+      {type: "score", prompt: "How severe is it?", options: [["low", ""], ["medium", ""], ["high", ""], ["critical", ""]]}]
+  },
+  "Email triage": {
+    mode: "text",
+    text: "From: vendor@example.com\nSubject: Updated bank details\n\nHi, please update our bank account for all future payments to the account below, effective immediately.",
+    questions: [
+      {type: "choice", prompt: "What kind of email is this?", options: [["invoice", ""], ["payment change request", ""], ["marketing", ""], ["support question", ""], ["other", ""]]},
+      {type: "noul", prompt: "Should a person check this before anyone acts on it?"}]
+  },
+  "Review moderation": {
+    mode: "text",
+    text: "Absolutely terrible. The delivery guy was rude and the box was crushed, but the blender itself works fine.",
+    questions: [
+      {type: "score", prompt: "How positive is this review?", options: [["very negative", ""], ["negative", ""], ["mixed", ""], ["positive", ""], ["very positive", ""]]},
+      {type: "choice", prompt: "What is the main complaint about?", options: [["the product", ""], ["delivery", ""], ["price", ""], ["customer service", ""], ["no complaint", ""]]},
+      {type: "noul", prompt: "Does the review break the rules (insults, personal data, spam)?"}]
+  },
+  "Empty": {mode: "text", text: "", questions: [{type: "choice", prompt: "", options: [["", ""], ["", ""]]}]}
+};
+const $ = id => document.getElementById(id);
+const store = {get(k) { try { return localStorage.getItem(k); } catch (e) { return null; } },
+               set(k, v) { try { localStorage.setItem(k, v); } catch (e) {} },
+               del(k) { try { localStorage.removeItem(k); } catch (e) {} }};
+let model = null;          // {mode, text, fields:[[k,v]], questions:[{type, prompt, options:[[name,hint]], instructions, criteria, none}]}
+let last = null;
+
+function toast(msg) { const t = $("toast"); t.textContent = msg; t.classList.add("on"); clearTimeout(toast.t); toast.t = setTimeout(() => t.classList.remove("on"), 1800); }
+function clone(x) { return JSON.parse(JSON.stringify(x)); }
+function el(tag, attrs = {}, ...kids) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === "on") for (const [ev, fn] of Object.entries(v)) e.addEventListener(ev, fn);
+    else if (k === "class") e.className = v;
+    else if (v === true) e.setAttribute(k, "");
+    else if (v !== false && v != null) e.setAttribute(k, v);
+  }
+  for (const c of kids.flat()) if (c != null) e.append(c);
+  return e;
+}
+function copyIcon() {
+  const ns = "http://www.w3.org/2000/svg", svg = document.createElementNS(ns, "svg");
+  svg.setAttribute("width", "14"); svg.setAttribute("height", "14"); svg.setAttribute("viewBox", "0 0 16 16");
+  svg.setAttribute("fill", "none"); svg.setAttribute("stroke", "currentColor"); svg.setAttribute("stroke-width", "1.5");
+  for (const [x, y] of [[5, 5], [2, 2]]) {
+    const r = document.createElementNS(ns, "rect");
+    for (const [k, v] of Object.entries({x, y, width: 9, height: 9, rx: 1.5})) r.setAttribute(k, v);
+    svg.append(r);
+  }
+  return svg;
+}
+function grow(t) { t.style.height = "auto"; t.style.height = Math.min(t.scrollHeight + 2, 320) + "px"; }
+function saveDraft() { store.set("od-form", JSON.stringify(model)); }
+
+// ------------------------------------------------------------------ case
+function setMode(m) {
+  model.mode = m;
+  $("modeText").classList.toggle("on", m === "text"); $("modeFields").classList.toggle("on", m === "fields");
+  $("stateText").hidden = m !== "text"; $("stateFields").hidden = m !== "fields";
+  if (m === "fields" && !model.fields.length) model.fields = [["", ""]];
+  renderFields(); saveDraft();
+}
+function renderFields() {
+  requestAnimationFrame(() => document.querySelectorAll("#fieldRows textarea").forEach(grow));
+  const box = $("fieldRows"); box.innerHTML = "";
+  model.fields.forEach((f, i) => {
+    box.append(el("div", {class: "row"},
+      el("input", {type: "text", value: f[0], placeholder: "Field (e.g. Message)", "aria-label": "field name",
+                   on: {input: e => { f[0] = e.target.value; saveDraft(); }}}),
+      Object.assign(el("textarea", {rows: 1, class: "val", placeholder: "Value", "aria-label": "field value",
+                   on: {input: e => { f[1] = e.target.value; grow(e.target); saveDraft(); }}}), {value: f[1]}),
+      el("button", {class: "icon", title: "Remove field", on: {click: () => { model.fields.splice(i, 1); renderFields(); saveDraft(); }}}, "×")));
+  });
+}
+function addField() { model.fields.push(["", ""]); renderFields(); saveDraft(); const ins = $("fieldRows").querySelectorAll("input"); ins[ins.length - 1]?.focus(); }
+
+// ------------------------------------------------------------------ questions
+function newQuestion(type = "choice") {
+  return {type, prompt: "", options: type === "noul" ? [] : [["", ""], ["", ""]], instructions: "", criteria: "", none: true};
+}
+function renderQuestions() {
+  const box = $("qs"); box.innerHTML = "";
+  model.questions.forEach((q, qi) => box.append(questionCard(q, qi)));
+}
+function questionCard(q, qi) {
+  const seg = el("div", {class: "seg"}, TYPES.map(([t, label]) =>
+    el("button", {class: q.type === t ? "on" : "", on: {click: () => {
+      if (q.type === t) return;
+      if (t !== "noul" && q.options.length < 2) q.options = [["", ""], ["", ""]];
+      q.type = t; renderQuestions(); saveDraft(); }}}, label)));
+  const card = el("div", {class: "q"},
+    el("div", {class: "top"},
+      el("span", {class: "num"}, String(qi + 1)),
+      el("div", {class: "types"}, seg),
+      el("button", {class: "icon", title: "Duplicate", on: {click: () => { model.questions.splice(qi + 1, 0, clone(q)); renderQuestions(); saveDraft(); }}}, copyIcon()),
+      el("button", {class: "icon", title: "Remove question", on: {click: () => { model.questions.splice(qi, 1); if (!model.questions.length) model.questions.push(newQuestion()); renderQuestions(); saveDraft(); }}}, "×")),
+    el("input", {type: "text", class: "prompt", value: q.prompt,
+                 placeholder: q.type === "noul" ? "Ask a yes / no question…" : q.type === "score" ? "What should be rated?" : "Ask a question…",
+                 "aria-label": "question", on: {input: e => { q.prompt = e.target.value; saveDraft(); }}}));
+  if (q.type !== "noul") {
+    const opts = el("div", {class: "opts"});
+    q.options.forEach((o, oi) => {
+      opts.append(el("div", {class: "row"},
+        el("span", {class: "dot"}),
+        el("input", {type: "text", value: o[0], placeholder: q.type === "score" ? `Level ${oi + 1} (lowest first)` : `Option ${oi + 1}`,
+                     "aria-label": "option", on: {input: e => { o[0] = e.target.value; saveDraft(); },
+                       keydown: e => { if (e.key === "Enter" && !e.ctrlKey && !e.metaKey) { e.preventDefault(); addOption(q, oi + 1, card); } }}}),
+        q.type === "choice" ? el("input", {type: "text", class: "hint", value: o[1], placeholder: "hint (optional)", "aria-label": "option hint",
+                     on: {input: e => { o[1] = e.target.value; saveDraft(); }}}) : null,
+        el("button", {class: "icon", title: "Remove", disabled: q.options.length <= 2,
+                      on: {click: () => { q.options.splice(oi, 1); renderQuestions(); saveDraft(); }}}, "×")));
+    });
+    opts.append(el("button", {class: "btn small ghost", on: {click: () => addOption(q, q.options.length, card)}},
+      q.type === "score" ? "+ Add level" : "+ Add option"));
+    card.append(opts);
+  }
+  const more = el("details", {class: "more"}, el("summary", {}, "More settings"),
+    el("div", {class: "inner"},
+      el("div", {}, el("label", {}, "Instructions for this question (optional)"),
+        el("input", {type: "text", value: q.instructions, placeholder: "e.g. Only use what the customer wrote",
+                     on: {input: e => { q.instructions = e.target.value; saveDraft(); }}})),
+      q.type === "noul" ? el("div", {}, el("label", {}, "When is the answer yes? (optional)"),
+        el("input", {type: "text", value: q.criteria, placeholder: "e.g. the customer mentions a deadline today",
+                     on: {input: e => { q.criteria = e.target.value; saveDraft(); }}})) : null,
+      el("label", {class: "check"}, el("input", {type: "checkbox", checked: q.none !== false,
+          on: {change: e => { q.none = e.target.checked; saveDraft(); }}}), "Also report \"none of these fits\"")));
+  if (q.instructions || q.criteria) more.open = true;
+  card.append(more);
+  return card;
+}
+function addOption(q, at, card) {
+  q.options.splice(at, 0, ["", ""]); renderQuestions(); saveDraft();
+  const qi = model.questions.indexOf(q);
+  const rows = $("qs").children[qi].querySelectorAll(".opts .row");
+  rows[at]?.querySelector("input")?.focus();
+}
+
+// ------------------------------------------------------------------ request building
+function questionKey(q, i) {
+  const base = (q.prompt || `question ${i + 1}`).toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "").slice(0, 40) || `q${i + 1}`;
+  return base;
+}
+function buildRequest() {
+  const errs = [];
+  let state;
+  if (model.mode === "text") {
+    state = model.text.trim(); if (!state) errs.push("The case is empty.");
+  } else {
+    state = {};
+    for (const [k, v] of model.fields) if (k.trim() || v.trim()) state[k.trim() || "field"] = v;
+    if (!Object.keys(state).length) errs.push("Add at least one field to the case.");
+  }
+  const questions = {}, specs = {}, used = new Set();
+  model.questions.forEach((q, i) => {
+    if (!q.prompt.trim()) { errs.push(`Question ${i + 1} has no text.`); return; }
+    let key = questionKey(q, i), n = 2;
+    while (used.has(key)) key = `${questionKey(q, i)}_${n++}`;
+    used.add(key);
+    const spec = {type: q.type, prompt: q.prompt.trim()};
+    if (q.type !== "noul") {
+      const opts = q.options.filter(o => o[0].trim());
+      if (opts.length < 2) { errs.push(`Question ${i + 1} needs at least two ${q.type === "score" ? "levels" : "options"}.`); return; }
+      if (new Set(opts.map(o => o[0].trim())).size !== opts.length) errs.push(`Question ${i + 1} has the same option twice.`);
+      const list = opts.map(o => q.type === "choice" && o[1].trim() ? {name: o[0].trim(), description: o[1].trim()} : o[0].trim());
+      if (q.type === "choice") spec.options = list; else spec.levels = list;
+    }
+    if (q.instructions.trim()) spec.instructions = q.instructions.trim();
+    if (q.type === "noul" && q.criteria.trim()) spec.criteria = q.criteria.trim();
+    if (q.none === false) spec.none = false;
+    questions[key] = spec; specs[key] = {q, i};
+  });
+  if (!model.questions.length) errs.push("Add a question.");
+  const body = {state, questions};
+  if ($("conformal").checked) body.conformal = {alpha: 0.1};
+  return {body, specs, errs};
+}
+
+// ------------------------------------------------------------------ server
+function headers() {
+  const h = {"content-type": "application/json"};
+  const k = $("key").value.trim(); if (k) h["authorization"] = "Bearer " + k;
+  return h;
+}
+async function loadInfo() {
+  try {
+    const r = await fetch("/v1/info", {headers: headers()});
+    if (r.status === 401) { $("info").textContent = "Enter the API key to connect →"; return false; }
+    const i = await r.json();
+    $("info").textContent = `Connected · ${i.model}` + (i.logging ? " · corrections are saved" : "");
+    return true;
+  } catch (e) { $("info").textContent = "Server unreachable"; return false; }
+}
+function friendlyError(status, out) {
+  if (status === 401) return "The API key is missing or wrong (top right).";
+  const d = out && out.detail;
+  if (Array.isArray(d)) return "The request was not accepted:\n" + d.map(x => "• " + (x.msg || JSON.stringify(x))).join("\n");
+  return typeof d === "string" ? d : `Error ${status}`;
+}
+async function run() {
+  $("err").textContent = "";
+  const {body, specs, errs} = buildRequest();
+  if (errs.length) { $("err").textContent = errs.join("\n"); return; }
+  $("run").disabled = true; $("run").textContent = "Deciding…";
+  try {
+    const r = await fetch("/v1/decide", {method: "POST", headers: headers(), body: JSON.stringify(body)});
+    const out = await r.json().catch(() => ({}));
+    if (!r.ok) { $("err").textContent = friendlyError(r.status, out); return; }
+    last = {id: r.headers.get("x-request-id"), body, specs, out};
+    renderAnswers();
+    if (window.matchMedia("(max-width: 920px)").matches) $("results").scrollIntoView({behavior: "smooth"});
+  } catch (e) { $("err").textContent = "Could not reach the server."; }
+  finally { $("run").disabled = false; $("run").textContent = "Decide"; }
+}
+
+// ------------------------------------------------------------------ answers
+const pct = p => (100 * p).toFixed(p >= 0.995 || p < 0.001 ? 0 : 1) + "%";
+function renderAnswers() {
+  const {out, body, specs, id} = last;
+  const box = $("answers"); box.innerHTML = "";
+  const t = out.timing_ms;
+  box.append(el("div", {class: "timing"}, `Answered in ${(t.total / 1000).toFixed(t.total < 1000 ? 2 : 1)} s`));
+  for (const [key, a] of Object.entries(out.answers)) {
+    const spec = body.questions[key], q = specs[key].q;
+    const names = spec.type === "noul" ? ["yes", "no"] : (spec.options || spec.levels).map(o => typeof o === "string" ? o : o.name);
+    const isNone = a.value === "none";
+    const card = el("div", {class: "ans"}, el("div", {class: "qtext"}, `${specs[key].i + 1}. ${spec.prompt}`));
+    const verdict = el("div", {class: "verdict"},
+      el("span", {class: "value"}, isNone ? "None of these fits" : spec.type === "noul" ? (a.value === "yes" ? "Yes" : "No") : a.value));
+    if (spec.type !== "noul" && a.confidence !== undefined) verdict.append(el("span", {class: "conf"}, `confidence ${Math.round(100 * a.confidence)}%`));
+    if (a.abstain) verdict.append(el("span", {class: "badge", title: a.set ? "Can't rule out: " + a.set.join(", ") : ""}, "unsure"));
+    card.append(verdict);
+    const rows = names.map(n => [n, a.probs[n] ?? 0]);
+    if (spec.type !== "score") rows.sort((x, y) => y[1] - x[1]);
+    for (const [n, p] of rows) {
+      card.append(el("div", {class: "bar" + (n === a.value ? " top" : ""), title: `${n}: ${pct(p)}`},
+        el("span", {class: "name"}, spec.type === "noul" ? (n === "yes" ? "Yes" : "No") : n),
+        el("span", {class: "track"}, el("span", {class: "fill", style: `width:${(100 * p).toFixed(1)}%`})),
+        el("span", {class: "pct"}, pct(p))));
+    }
+    if (a.none !== undefined && a.none >= 0.05) {
+      card.append(el("div", {class: "bar none", title: "How likely none of the options fits"},
+        el("span", {class: "name"}, "none of these"),
+        el("span", {class: "track"}, el("span", {class: "fill", style: `width:${(100 * a.none).toFixed(1)}%`})),
+        el("span", {class: "pct"}, pct(a.none))));
+    }
+    if (spec.type === "score" && a.expected_index !== undefined && names.length > 2) {
+      const e = a.expected_index, lo = Math.floor(e), hi = Math.min(names.length - 1, lo + 1);
+      card.append(el("div", {class: "hint-text"}, `Average rating: between “${names[lo]}” and “${names[hi]}” (${(e + 1).toFixed(1)} of ${names.length})`));
+    }
+    if (id) card.append(feedbackRow(key, spec, names, a));
+    box.append(card);
+  }
+}
+function feedbackRow(key, spec, names, a) {
+  const row = el("div", {class: "fb"});
+  const send = async (payload, label) => {
+    const r = await fetch("/v1/feedback", {method: "POST", headers: headers(),
+      body: JSON.stringify({request_id: last.id, question: key, ...payload})});
+    row.innerHTML = "";
+    row.append(r.ok ? el("span", {class: "saved"}, label) : el("span", {class: "err"}, "Could not save (" + r.status + ")"),
+      el("button", {class: "btn small ghost", on: {click: () => row.replaceWith(feedbackRow(key, spec, names, a))}}, "Change"));
+  };
+  const toLabel = v => spec.type === "noul" ? v === "yes" : v;
+  const show = v => spec.type === "noul" ? (v === "yes" ? "Yes" : "No") : v;
+  const sel = el("select", {"aria-label": "right answer"},
+    el("option", {value: ""}, "Should be…"),
+    names.filter(n => n !== a.value).map(n => el("option", {value: n}, show(n))),
+    el("option", {value: "__missing__"}, "Something not listed…"));
+  const inp = el("input", {type: "text", placeholder: "What should it be?", hidden: true, "aria-label": "answer not listed"});
+  const save = el("button", {class: "btn small", hidden: true, on: {click: () => {
+    if (sel.value === "__missing__") { if (!inp.value.trim()) { inp.focus(); return; } send({label: null, missing: inp.value.trim()}, "Saved: " + inp.value.trim()); }
+    else if (sel.value) send({label: toLabel(sel.value)}, "Saved: " + show(sel.value));
+  }}}, "Save");
+  sel.addEventListener("change", () => { inp.hidden = sel.value !== "__missing__"; save.hidden = !sel.value; if (!inp.hidden) inp.focus(); });
+  inp.addEventListener("keydown", e => { if (e.key === "Enter") save.click(); });
+  row.append(el("span", {class: "lbl"}, "Was it right?"));
+  if (a.value !== "none") row.append(el("button", {class: "btn small", on: {click: () => send({label: toLabel(a.value)}, "Saved: correct")}}, "✓ Correct"));
+  row.append(sel, inp, save);
+  return row;
+}
+
+// ------------------------------------------------------------------ setups
+function savedSetups() { try { return JSON.parse(store.get("od-setups") || "{}"); } catch (e) { return {}; } }
+function renderSetupPick(selected) {
+  const pick = $("setupPick"); pick.innerHTML = "";
+  const mine = savedSetups();
+  const g1 = el("optgroup", {label: "Examples"}, Object.keys(EXAMPLES).map(n => el("option", {value: "ex:" + n}, n)));
+  pick.append(el("option", {value: ""}, "Load…"), g1);
+  if (Object.keys(mine).length) pick.append(el("optgroup", {label: "My setups"}, Object.keys(mine).sort().map(n => el("option", {value: "my:" + n}, n))));
+  pick.value = selected || "";
+  $("delSetup").hidden = !(selected || "").startsWith("my:");
+}
+function load(m, selected) {
+  model = Object.assign({mode: "text", text: "", fields: [], questions: []}, clone(m));
+  model.questions = model.questions.map(q => Object.assign(newQuestion(q.type), q));
+  $("stateArea").value = model.text || "";
+  setMode(model.mode); renderQuestions(); renderSetupPick(selected); saveDraft();
+}
+$("setupPick").addEventListener("change", e => {
+  const v = e.target.value; if (!v) return;
+  if (v.startsWith("ex:")) load(EXAMPLES[v.slice(3)], v); else load(savedSetups()[v.slice(3)], v);
+});
+$("saveSetup").addEventListener("click", () => {
+  const cur = $("setupPick").value;
+  const name = prompt("Name this setup", cur.startsWith("my:") ? cur.slice(3) : "");
+  if (!name || !name.trim()) return;
+  const all = savedSetups(); all[name.trim()] = model; store.set("od-setups", JSON.stringify(all));
+  renderSetupPick("my:" + name.trim()); toast("Setup saved in this browser");
+});
+$("delSetup").addEventListener("click", () => {
+  const cur = $("setupPick").value; if (!cur.startsWith("my:")) return;
+  if (!confirm(`Delete the setup “${cur.slice(3)}”?`)) return;
+  const all = savedSetups(); delete all[cur.slice(3)]; store.set("od-setups", JSON.stringify(all)); renderSetupPick("");
+});
+
+// ------------------------------------------------------------------ wiring
+$("modeText").addEventListener("click", () => setMode("text"));
+$("modeFields").addEventListener("click", () => setMode("fields"));
+$("stateArea").addEventListener("input", e => { model.text = e.target.value; saveDraft(); });
+$("addField").addEventListener("click", addField);
+$("addQ").addEventListener("click", () => { model.questions.push(newQuestion()); renderQuestions(); saveDraft();
+  const ins = $("qs").querySelectorAll(".prompt"); ins[ins.length - 1]?.focus(); });
+$("run").addEventListener("click", run);
+document.addEventListener("keydown", e => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); run(); } });
+$("copyApi").addEventListener("click", async () => {
+  const {body, errs} = buildRequest();
+  if (errs.length) { $("err").textContent = errs.join("\n"); return; }
+  const cmd = `curl -s ${location.origin}/v1/decide \\\n  -H "Authorization: Bearer $OPENDECIDER_KEY" -H "content-type: application/json" \\\n  -d '${JSON.stringify(body).replace(/'/g, "'\\''")}'`;
+  try { await navigator.clipboard.writeText(cmd); toast("Copied (set OPENDECIDER_KEY to your key)"); }
+  catch (e) { window.prompt("Copy this command", cmd); }
+});
+$("key").value = store.get("od-key") || "";
+$("key").addEventListener("change", () => { store.set("od-key", $("key").value.trim()); loadInfo(); });
+
+let draft = null; try { draft = JSON.parse(store.get("od-form")); } catch (e) {}
+if (draft && draft.questions) load(draft, ""); else load(EXAMPLES["Support ticket"], "ex:Support ticket");
+loadInfo();
+</script>
+</body>
+</html>
