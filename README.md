@@ -403,6 +403,10 @@ curl -s localhost:8000/v1/decide -H 'content-type: application/json' -d '{
 | `POST /v1/decide` | Probabilities for every question. No text generation. |
 | `POST /v1/calibrate` | Fit a calibration profile from labeled examples (`method: "auto"` by default). Use it with `"calibration": "<id>"`. |
 | `POST /v1/explain` | Optional. Explanation, evidence spans and a faithfulness score for one question. |
+| `POST /v1/feedback` | With `--log-dir`: the right answer for one question of a logged request (`request_id` from the `X-Request-Id` response header). When the right answer was not an option, send `"label": null, "missing": "<what it should be>"`. |
+| `GET /v1/feedback/export?question=<name>` | With `--log-dir`: the feedback for one question as a ready `/v1/calibrate` body. |
+| `GET /v1/info` | Model, uptime, request and batching counters. |
+| `GET /` | Playground page: run requests, see the probabilities, mark or correct each answer. |
 | `GET /healthz` | Health check. |
 
 Each answer has `value`, `probs`, `confidence`, `none` (the probability that no listed option is supported) and `std`
@@ -414,6 +418,27 @@ requests return 400. Probabilities sum to 1 within 1e-6.
 binning (binary questions) and shrunk isotonic by cross-validated log loss, and keeps the simplest one within one
 standard error of the best. Profiles also store conformal scores, so `conformal` uses your labels when a profile is
 given.
+
+### Serving on a local network
+
+```bash
+.venv/bin/python -m opendecider.serve --model checkpoints/opendecider-9b --host 0.0.0.0 \
+  --api-key-file ~/.config/opendecider/api_key --log-dir runs/server --warmup
+```
+
+Off localhost the server needs an API key (`Authorization: Bearer <key>` or `X-API-Key`). `/healthz` and the
+playground page stay open; the page asks for the key. `scripts/server.sh install` sets this up as a systemd user
+service that starts only on demand (`scripts/server.sh start|stop|status|logs|key`); settings are in
+`~/.config/opendecider/server.env`. The request log stores the states you send, so keep `--log-dir` private.
+
+One process serves all requests. Requests that arrive while the GPU is busy are batched together: one state pass
+over all their states and one question pass per dependency wave (`--max-batch`, default 16; `--max-batch-tokens`,
+default 16384). A request that arrives alone uses the prefix cache. If a batch fails, its requests are retried one
+by one, so a bad request fails only itself. On the 9B with 8 concurrent clients (3 questions per request), batching
+raises throughput from 0.42 to 1.48 requests/s and lowers the median wait from 18.7 s to 5.4 s
+(`scripts/bench_serving.py`, `runs/serving/`). Batched requests skip the prefix cache, so their probabilities can differ
+from a lone request's by up to about 0.1 on near-ties (the same size as the documented serving-path change); batching
+alone, without the cache difference, moves them by about 0.02. `--max-batch 1` turns batching off.
 
 Environment variables:
 
