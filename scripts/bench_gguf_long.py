@@ -116,6 +116,18 @@ def main():
                 json.dump(res, open(a.out, "w"), indent=1); print(key, "ERROR", e, flush=True)
             finally:
                 p.terminate(); p.wait(); time.sleep(5)
+                # llama.cpp's breakdown at load and at exit: self = model + context + compute buffers; growth of
+                # "unaccounted" device memory between the two = pool allocations made while serving (temporary
+                # dequantized K/V, expanded K/V, workspaces), which the buffer report does not include
+                rows = re.findall(r"CUDA0 \(Orin\)\s*\|\s*(\d+) = (\d+) \+ \((\d+) =.*\) \+\s*(\d+)", open(log.name).read())
+                if len(rows) >= 2:
+                    self_mib, un0, un1 = int(rows[0][2]), int(rows[0][3]), int(rows[-1][3])
+                    r["device_self_mib"] = self_mib
+                    r[f"{a.phase}_pool_growth_mib"] = un1 - un0
+                    r[f"{a.phase}_device_peak_est_mib"] = self_mib + max(0, un1 - un0)
+                    res[key] = r
+                    json.dump(res, open(a.out, "w"), indent=1)
+                    print(key, "device self", self_mib, "MiB, pool growth", un1 - un0, "MiB", flush=True)
 
 
 if __name__ == "__main__":

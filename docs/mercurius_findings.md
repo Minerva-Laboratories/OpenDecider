@@ -61,6 +61,11 @@ says what was seen, why it matters, and what a fix would look like. "Inherited" 
    at near-tied tokens between backends (PyTorch vs llama.cpp: 3-4 of 5 prompts identical for 32 tokens). Expected
    for a quantized cache, but worth stating when comparing implementations.
 
+15. **The latent ranks are odd and irregular (579, 451, 390, 427, 579, 543, 471, 656).** Inner dimensions that are
+    not multiples of 8 keep cuBLAS off its tensor-core paths: the prefill up-projection GEMMs ran at ~5 TFLOP/s until
+    the weights were zero-padded to the decoded latent's width (multiple of 16) at run time (~2 MB per call;
+    64k-cell slice set: 29 -> 10 ms per layer). Multiples of 64 would have cost nothing to train.
+
 ## Checkpoint / packaging
 
 9. **The release is a research checkpoint, not a model.** Using it needs Mercurius's own `build()`: base Qwen3.5-4B ->
@@ -90,3 +95,11 @@ says what was seen, why it matters, and what a fix would look like. "Inherited" 
   packed cache directly.
 - PyTorch: LM-head dequant used int64 indices (1.3 GB transient); option rows kept every layer's GDN state
   for the whole pass; a conv-state view pinned each row's input.
+- llama.cpp: expanded prefill materialized the expanded K/V for the whole cache (5.6 KB per cached token, 2.9 GB at
+  512k) -> one fused op processes the cache in 16k-cell slices (decode, expansion GEMMs, MMA flash attention in
+  partial mode) merged online by log-sum-exp; ~150 MB of fixed workspace held in the op's compute-buffer slot.
+  32k perplexity: single 64k slice 5.5366 vs 16k slices 5.5367.
+- llama.cpp: decode attention wrote one partial result per 64-cell chunk (~39 MB per layer at 64k, more than the
+  cache) and merged them with 16 blocks -> split-KV with a running softmax per block, cp.async staging, rope keys by a
+  tensor-core GEMM, padded shared-memory strides: 15k cells 1322 -> 443 us per layer; at 64k decode 11.5 -> 18.3 tok/s
+  (Qwen3.5-4B: 19.5 with f16 KV, 14.2 with turbo4 KV).
