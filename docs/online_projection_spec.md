@@ -30,6 +30,32 @@ memory-head variant is kept as a separate track in Appendix A, corrected after r
   Caveats: the static basis was fitted on code (different domain) and is PCA, not a trained MLA projection; one text,
   one model; the errors are output errors, not perplexity (Phase 2).
 
+- **Phase 2, first run (2026-10-08):** the compression inside Qwen3.5-2B's forward pass (all 6 attention layers), mean
+  NLL increase per token vs the uncompressed model (prose / code; baseline NLL 1.535 / 1.8024; 4 x 8k prose and
+  2 x 8k code tokens; 95% bootstrap CIs over 512-token blocks in `runs/online_projection_phase2.json`). Static basis now
+  fitted on held-out MIXED code + prose. Script `scripts/online_projection_phase2.py`.
+
+  | | static | online | qw | oracle (non-causal) |
+  |---|---|---|---|---|
+  | keys r = 32 | +0.458 / +0.711 | +0.360 / +0.561 | +0.365 / +0.555 | +0.275 / +0.449 |
+  | keys r = 64 | +0.169 / +0.257 | +0.149 / +0.208 | +0.159 / +0.217 | +0.085 / +0.151 |
+  | keys r = 96 | +0.070 / +0.114 | +0.068 / +0.085 | +0.075 / +0.094 | +0.041 / +0.069 |
+
+  | | static | online | oracle |
+  |---|---|---|---|
+  | values r = 64 | +0.177 / +0.249 | +0.125 / +0.174 | +0.055 / +0.094 |
+  | values r = 128 | +0.041 / +0.059 | +0.031 / +0.044 | +0.004 / +0.019 |
+  | keys 64 + values 128 | +0.214 / +0.324 | +0.183 / +0.261 | +0.088 / +0.162 |
+
+  Readings: online beats a static (MLA-like) basis by 10-30% of the NLL cost for code keys and for values (CIs
+  separated); for prose keys the gain is small (r = 64: -12%, CIs overlap; r = 96: a tie). Query weighting does not
+  help in the model (slightly worse than plain online). The oracle shows much more headroom (values r = 128 nearly
+  free: +0.004 prose). In the switch test the forgetting rate barely matters (gamma 0.8-0.97 within noise), so the
+  gap to the oracle looks like the cost of a causal estimate (basis from past chunks only), not of forgetting. Topic switch (code <-> prose at 4k): online keys lose ~0.03 nats more than static right after a code -> prose
+  switch and gain ~0.03 after prose -> code, CIs overlapping: re-tracking is fast, no lasting damage.
+  Next: a basis fitted on the whole PROMPT (legal at inference: the prompt is known before generation) plus online
+  updates during generation, measured on the continuation only; lazy re-encoding (option c) of recent chunks.
+
 ## 1. Idea
 MLA caches `c_t = W_c x_t` with one learned, fixed `W_c` for every input. Within one sequence, keys occupy a much smaller
 subspace than across sequences: ShadowKV measured pre-RoPE keys as extremely low-rank within a sequence, with subspaces
