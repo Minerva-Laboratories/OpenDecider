@@ -1124,9 +1124,16 @@ The previous release measured exactly 0 on the permutation probe; the clean mode
 The model itself is order-invariant (differences at float precision with the per-row path). The effect comes from
 the fused shared-prefix attention: each row's own keys sit at a different position in the shared attention call
 depending on the row's index, which changes the floating-point summation order. The worst case, 0.024 in
-probability, is larger than float noise usually is. A fix that keeps the speed is to compute attention over the
-shared prefix and over each row's own tokens separately and merge them by their log-sum-exp (Hydragen), so every row
-sees the same key layout; not done yet. `v3_shared_prefix: false` gives exact invariance at a memory cost.
+probability, is larger than float noise usually is. Fixed 2026-10-11 (Hydragen split, `prefix_attn._split_attention`):
+attention over the shared prefix (all rows' queries in one wide flash call) and over each row's own tokens are
+computed separately and merged exactly by their log-sum-exp, so every row sees the same key layout.
+
+| Option-row attention | Mean TV | Worst TV |
+|---|---|---|
+| Shared prefix, Hydragen split (default since 2026-10-11) | 2.8e-08 | 1.7e-07 |
+
+Latency is unchanged or better (`scripts/profile_latency.py`, 16 questions x 32 options, ~1.6k-token state, Orin
+MODE_50W, p50 old -> new): 2B 2.64 -> 2.62 s, 9B 6.23 -> 5.99 s.
 
 ### 18.3 Explanations
 

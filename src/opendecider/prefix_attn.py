@@ -2,10 +2,14 @@
 
 Every option row continues from its state's cache. The stock path gives each row its own bf16 copy of the state's
 K/V (and concatenates the row's keys onto it), so memory grows with rows × state tokens. Here each full-attention
-layer attends to ONE dequantized copy of the state K/V per state plus the row's own keys, in one fused SDPA call per
-state (memory-efficient kernel; scores are never materialized). The g query heads of each KV head are folded into the
-query length, so GQA needs no K/V expansion, and a boolean mask limits each row's suffix keys to its own tokens. The row cache holds a stride-0 placeholder for the attention layers, so position bookkeeping
-(get_seq_length, RoPE positions) still sees the prefix length.
+layer reads ONE dequantized copy of the state K/V per state. With one state per call (inference), attention is split
+as in Hydragen: all rows' queries attend the shared prefix in one call, each row attends its own tokens causally, and
+the two parts are merged exactly by their log-sum-exp (`_split_attention`; the wide flash kernel on CUDA). Every row
+then sees the same key layout, so outputs do not depend on row order (the earlier single fused call placed each row's
+own keys at an index-dependent offset: permutation TV 0.0028, worst 0.024 on the 2B). With several states and small
+prefixes, one batched masked SDPA call reads each row's state K/V gathered (row_state). The row cache holds a
+stride-0 placeholder for the attention layers, so position bookkeeping (get_seq_length, RoPE positions) still sees
+the prefix length.
 GDN layers are untouched (their per-row state is fixed-size).
 """
 from __future__ import annotations
@@ -34,6 +38,42 @@ def _kernels(dev):
 def _attn_modules(bb):
     return [(i, l.self_attn) for i, l in enumerate(bb.lm.layers)
             if bb.layer_types[i] == "full_attention" and hasattr(l, "self_attn")]
+
+
+def _split_attention(q, k, v, Kp, Vp, pm, scale):
+    """Hydragen split for rows continuing ONE shared prefix: q (n, Hq, t, D) attends the prefix Kp/Vp (Hkv, T, D;
+    pm (T,) real keys or None) and its own row's k/v (n, Hkv, t, D) causally; the two softmax parts are merged
+    exactly by their log-sum-exp. Every row sees the same key layout whatever its index, so outputs do not depend
+    on row order (the old fused call put each row's own keys at an index-dependent offset). Returns (n, Hq, t, D)."""
+    n, Hq, t, D = q.shape
+    Hkv, T = Kp.shape[0], Kp.shape[1]
+    if q.is_cuda and D in (64, 128, 256) and 64 % (Hq // Hkv) == 0:          # wide kernel: BM=64 rows
+        from .wide_attention import wide_attention
+        qs = q.transpose(0, 1).reshape(1, Hq, n * t, D)                          # all rows' queries, prefix keys only
+        o_p, l_p = wide_attention(qs, Kp[None], Vp[None], scale, None if pm is None else pm[None], causal=False,
+                                  return_lse=True)
+        o_p, l_p = o_p.view(Hq, n, t, D).transpose(0, 1).float(), l_p.view(Hq, n, t).transpose(0, 1)
+        o_o, l_o = wide_attention(q, k, v, scale, None, causal=True, return_lse=True)
+        o_o = o_o.float()
+    else:                                                                          # CPU / other widths: same math
+        g = Hq // Hkv
+        Ke, Ve = Kp.repeat_interleave(g, 0).float(), Vp.repeat_interleave(g, 0).float()
+        o_p = torch.empty(n, Hq, t, D, device=q.device, dtype=torch.float32)
+        l_p = torch.empty(n, Hq, t, device=q.device, dtype=torch.float32)
+        per = max(1, MASK_ELEMS // (Hq * t * max(T, 1)))                           # bound the score tensor
+        for a in range(0, n, per):
+            sp = torch.einsum("nhtd,hsd->nhts", q[a:a + per].float(), Ke) * scale
+            if pm is not None:
+                sp = sp.masked_fill(~pm.view(1, 1, 1, T), float("-inf"))
+            l_p[a:a + per] = torch.logsumexp(sp, -1)
+            o_p[a:a + per] = torch.softmax(sp, -1) @ Ve
+        so = torch.einsum("nhtd,nhud->nhtu", q.float(), k.repeat_interleave(g, 1).float()) * scale
+        so = so.masked_fill(~torch.ones(t, t, dtype=torch.bool, device=q.device).tril(), float("-inf"))
+        l_o = torch.logsumexp(so, -1)
+        o_o = torch.softmax(so, -1) @ v.repeat_interleave(g, 1).float()
+    m = torch.maximum(l_p, l_o)
+    wp, wo = torch.exp(l_p - m), torch.exp(l_o - m)
+    return ((o_p * wp[..., None] + o_o * wo[..., None]) / (wp + wo)[..., None]).to(v.dtype)
 
 
 def _forward(mod, ctx, hidden_states, position_embeddings, attention_mask=None, past_key_values=None, **kw):
@@ -75,41 +115,18 @@ def _forward(mod, ctx, hidden_states, position_embeddings, attention_mask=None, 
             o = F.scaled_dot_product_attention(q.reshape(R, Hkv, g * t, D), K, V, attn_mask=mask, scale=mod.scaling)
         o = o.reshape(R, Hkv * g, t, D).transpose(1, 2).reshape(R, t, -1)
         return mod.o_proj(o * torch.sigmoid(gate)), None
-    out = torch.empty(R, Hkv, g, t, D, device=dev, dtype=v.dtype)
-    qg = q.view(R, Hkv, g, t, D)
-    rmax = ctx["rows_of_max"]
-    krow = torch.arange(rmax, device=dev).repeat_interleave(t)                 # suffix key -> row, position
-    kpos = torch.arange(t, device=dev).repeat(rmax)
+    out = torch.empty(R, Hkv * g, t, D, device=dev, dtype=v.dtype)
     for s in ctx["states"]:                                                    # few states (1 at inference)
         r = ctx["rows_of"][s]
         if ctx.get("static"):                  # CUDA graphs: fixed shapes, prefix pads masked instead of sliced
-            Kps, Vps, Ts, pm = Kp[s], Vp[s], T, ctx["pmask"][s]
+            Kps, Vps, pm = Kp[s], Vp[s], ctx["pmask"][s]
         else:
             off = ctx["pad"][s]                                                # left padding of this state's prefix
-            Kps, Vps, Ts = Kp[s][:, off:], Vp[s][:, off:], T - off             # (Hkv, T_s, D): from the 1st real key
+            Kps, Vps = Kp[s][:, off:], Vp[s][:, off:]                          # (Hkv, T_s, D): from the 1st real key
             pm = ctx["pmask"][s, off:] if ctx["holes"][s] else None            # pads after it (padded question pass)
-        # rows in groups so the boolean mask (queries x keys) stays under MASK_ELEMS
-        per = max(1, MASK_ELEMS // (g * t * (Ts + t)))
-        for a in range(0, r.numel(), per):
-            rr = r[a:a + per]
-            n = rr.numel()
-            # GQA without copies: the g query heads of each kv head go into the query length dim
-            Q = qg.index_select(0, rr).permute(1, 2, 0, 3, 4).reshape(Hkv, 1, g * n * t, D)
-            ks = k.index_select(0, rr).permute(1, 0, 2, 3).reshape(Hkv, n * t, D)
-            vs = v.index_select(0, rr).permute(1, 0, 2, 3).reshape(Hkv, n * t, D)
-            K = torch.cat([Kps, ks], 1)[:, None]                                  # (Hkv, 1, Ts + n t, D)
-            V = torch.cat([Vps, vs], 1)[:, None]
-            # mask: every query sees the whole prefix; in the suffix only its own row, causally
-            qrow = torch.arange(n, device=dev).view(1, n, 1).expand(g, n, t).reshape(-1)
-            qpos = torch.arange(t, device=dev).view(1, 1, t).expand(g, n, t).reshape(-1)
-            own = (qrow[:, None] == krow[:n * t][None]) & (kpos[:n * t][None] <= qpos[:, None])
-            pre = pm.view(1, Ts).expand(own.shape[0], Ts) if pm is not None else \
-                torch.ones(own.shape[0], Ts, dtype=torch.bool, device=dev)
-            mask = torch.cat([pre, own], 1)
-            with _kernels(dev):
-                o = F.scaled_dot_product_attention(Q, K, V, attn_mask=mask[None, None], scale=mod.scaling)
-            out[rr] = o.view(Hkv, g, n, t, D).permute(2, 0, 1, 3, 4)
-    o = out.view(R, Hkv * g, t, D).transpose(1, 2).reshape(R, t, -1)
+        out[r] = _split_attention(q.index_select(0, r), k.index_select(0, r), v.index_select(0, r), Kps, Vps, pm,
+                                  mod.scaling)
+    o = out.transpose(1, 2).reshape(R, t, -1)
     o = o * torch.sigmoid(gate)
     return mod.o_proj(o), None
 
@@ -140,8 +157,7 @@ def shared_prefix_attention(bb, pc, rows: torch.Tensor, pmask: torch.Tensor, sta
         holes = ((~pm).sum(1).cpu() > torch.tensor(pad)).tolist()              # pads after the first real key
     ctx = {"kv": kv, "pad": pad, "holes": holes, "pmask": pmask.bool(), "states": states,
            "rows_of": rows_of, "static": static, "capture": capture, "q_kv": q_kv,
-           "q_state": None if q_state is None else q_state.to(pmask.device),
-           "rows_of_max": max(int(v.numel()) for v in rows_of.values())}
+           "q_state": None if q_state is None else q_state.to(pmask.device)}
     if not static and kv and len(states) > 1:
         # several states (e.g. one per question with the question cache): one batched call per layer when the
         # gathered per-row prefix K/V stays small, instead of one call per state
