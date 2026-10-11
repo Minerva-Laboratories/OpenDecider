@@ -117,3 +117,36 @@ def test_int4_cache_end_to_end_close_to_unquantized(monkeypatch, tmp_path):
         out[kv] = d.decide({"state": s, "questions": QS})                  # second call: served from the int4 cache
     assert out["int4"]["state_cached_tokens"] > 0
     assert (_probs(out["none"]) - _probs(out["int4"])).abs().max() < 5e-2
+
+
+def test_snapshots_carry_mercurius_latent_codes():
+    """Regression (2026-10-11): snapshots kept only K/V and GDN states, so a request resumed from the cache on a
+    Mercurius backbone lost its compressed attention history (repeat calls off by up to 0.6 in probability)."""
+    from types import SimpleNamespace
+    from transformers import DynamicCache
+    from opendecider.mercurius_cache import CODE_ATTRS, LatentCodesLayer
+    from opendecider.state_cache import PrefixCache
+
+    def parts(T, seed):
+        g = torch.Generator().manual_seed(seed)
+        return {"lat_codes": torch.randint(0, 255, (1, T, 5), generator=g, dtype=torch.uint8),
+                "lat_norm": torch.rand(1, T, generator=g).half(),
+                "rope_codes": torch.randint(0, 255, (1, T, 3), generator=g, dtype=torch.uint8),
+                "rope_norm": torch.rand(1, T, generator=g).half(), "inv_r": torch.rand(1, T, 4, generator=g),
+                "pos": torch.arange(T, dtype=torch.int32)[None]}
+    lay = LatentCodesLayer()
+    cache = DynamicCache()
+    cache.layers = [lay]
+    pc = PrefixCache(SimpleNamespace(cfg=SimpleNamespace(kv_quant="int8")))
+    a, b = parts(6, 0), parts(4, 1)
+    lay.append(**a)
+    s1 = pc._take(cache, "k1", None, 6)
+    lay.append(**b)
+    s2 = pc._take(cache, "k2", s1, 10)                                      # delta over s1: its own 4 tokens
+    pc._set_template(cache)
+    for snap, n in ((s1, 6), (s2, 10)):
+        got = pc._restore(snap).unpack(1).layers[0]
+        assert got.get_seq_length() == n
+        for k in CODE_ATTRS:
+            assert torch.equal(getattr(got, k), getattr(lay, k)[:, :n])
+    assert s2.nbytes() > 0 and all(t.shape[1] == 4 for t in s2.codes.values())

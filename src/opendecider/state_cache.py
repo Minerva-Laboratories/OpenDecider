@@ -4,7 +4,9 @@ Qwen3.5 is hybrid: Gated-DeltaNet layers carry a recurrent state that depends on
 independently encoded chunks cannot be spliced. What is exact is resuming from a snapshot of the whole cache at a
 prefix boundary. A snapshot stores
   - the attention K/V of ITS OWN tokens only (a delta over its parent snapshot; int8), and
-  - the GDN recurrent/conv states at its end (fixed size, independent of length).
+  - the GDN recurrent/conv states at its end (fixed size, independent of length), and
+  - on Mercurius backbones, the compressed attention codes of its own tokens (batch-first, sequence on dim 1; kept
+    as they are, already 4-bit).
 A request resumes from its deepest cached content prefix, prefills the rest of its content in one pass (snapshot
 taken there), then the closers (`]}\n`) in a second short pass that is never cached, so a growing state (events
 appended to a list) shares everything up to its previous end. Only leaves are evicted (LRU), so every snapshot's
@@ -20,7 +22,7 @@ from dataclasses import dataclass, field
 
 import torch
 
-from .backbone import PackedCache
+from .backbone import _CODE_ATTRS, PackedCache
 from .quant import kv_mode, maybe_quantize, materialize
 
 _KV = ("keys", "values")
@@ -34,12 +36,13 @@ class Snapshot:
     n_tokens: int                                  # total tokens up to this boundary
     kv: dict                                       # (layer, attr) -> int8 K/V slice of this snapshot's own tokens
     states: dict                                   # (layer, attr, k) -> GDN state at the boundary (bf16, cloned)
+    codes: dict = field(default_factory=dict)      # (layer, attr) -> Mercurius code slice of this snapshot's own tokens
     children: int = 0
     last_used: float = field(default_factory=time.monotonic)
 
     def nbytes(self) -> int:
         n = 0
-        for t in list(self.kv.values()) + list(self.states.values()):
+        for t in list(self.kv.values()) + list(self.states.values()) + list(self.codes.values()):
             n += t.nbytes() if hasattr(t, "q") else t.numel() * t.element_size()
         return n
 
@@ -64,8 +67,12 @@ class PrefixCache:
     # ------------------------------------------------------------------ snapshots
     def _take(self, cache, key, parent, n_tokens):
         n0 = parent.n_tokens if parent else 0
-        kv, st = {}, {}
+        kv, st, codes = {}, {}, {}
         for li, layer in enumerate(cache.layers):
+            for a in _CODE_ATTRS:
+                t = getattr(layer, a, None)
+                if isinstance(t, torch.Tensor):
+                    codes[(li, a)] = t[:, n0:n_tokens].clone()
             for a in _KV:
                 t = getattr(layer, a, None)
                 if isinstance(t, torch.Tensor) and t.numel():
@@ -78,7 +85,7 @@ class PrefixCache:
                             st[(li, a, k)] = t.detach().clone()
                 elif isinstance(d, torch.Tensor):
                     st[(li, a, None)] = d.detach().clone()
-        s = Snapshot(key, parent, n_tokens, kv, st)
+        s = Snapshot(key, parent, n_tokens, kv, st, codes)
         if parent is not None:
             parent.children += 1
         self.snaps[key] = s
@@ -107,6 +114,8 @@ class PrefixCache:
         tensors = {}
         for (li, a) in snap.kv:
             tensors[(li, a, None)] = torch.cat([materialize(p.kv[(li, a)]) for p in path], dim=-2)
+        for (li, a) in snap.codes:
+            tensors[(li, a, None)] = torch.cat([p.codes[(li, a)] for p in path], dim=1)
         for key, t in snap.states.items():
             tensors[key] = t.clone()
         for p in path:                              # touch the whole path (LRU)
