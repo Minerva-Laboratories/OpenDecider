@@ -51,3 +51,10 @@ def test_layer_append_expand_select_and_packed_cache():
         assert torch.equal(getattr(rows.layers[0], k), getattr(lay, k)[[1, 0, 1]])   # codes untouched by int8
     rep = pc.unpack(batch=2)
     assert torch.equal(rep.layers[0].lat_codes, lay.lat_codes.repeat_interleave(2, 0))
+
+
+def test_codebook_cached_per_device():
+    """Built once per (r, bits, device): no host-to-device copy per call (not allowed inside CUDA-graph capture)."""
+    from opendecider.mercurius_cache import _codebook
+    a, b = _codebook(64, 4, torch.device("cpu")), _codebook(64, 4, torch.device("cpu"))
+    assert a[0] is b[0] and a[1] is b[1]

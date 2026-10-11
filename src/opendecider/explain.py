@@ -142,7 +142,8 @@ class Explainer:
         LM head) runs as one CUDA graph; single-token decoding is launch-bound, so this is where graphs pay off."""
         from transformers.cache_utils import StaticCache
         bb, dev = self.bb, self.bb.device
-        graph = graph and dev.type == "cuda"
+        # Mercurius's compressed attention cache grows dynamically and reads back to the host: not graph-capturable
+        graph = graph and dev.type == "cuda" and getattr(bb, "shared_prefix_kind", "qwen") != "mercurius"
         prompt_ids = bb.tokenize([prompt])[0]
         L = len(prompt_ids)
         ids = torch.tensor([prompt_ids] * n, device=dev)

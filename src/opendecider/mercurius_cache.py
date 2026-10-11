@@ -24,10 +24,18 @@ CODE_ATTRS = ("lat_codes", "lat_norm", "rope_codes", "rope_norm", "inv_r", "pos"
 
 
 # ---------------------------------------------------------------------------------------------- TurboQuant codes
+_CODEBOOKS: dict = {}
+
+
 def _codebook(r, bits, device):
-    from mercurius.models.qat import tq_codebook
-    cen, bnd = tq_codebook(r, bits)
-    return cen.to(device), bnd.to(device)
+    """Codebook on `device`, built once per (r, bits, device): a host-to-device copy on every call is not allowed
+    inside CUDA-graph capture (the explanation decoder captures its decode step)."""
+    key = (r, bits, str(device))
+    if key not in _CODEBOOKS:
+        from mercurius.models.qat import tq_codebook
+        cen, bnd = tq_codebook(r, bits)
+        _CODEBOOKS[key] = (cen.to(device), bnd.to(device))
+    return _CODEBOOKS[key]
 
 
 def tq_encode(x: torch.Tensor, bits: int = 4):
