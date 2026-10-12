@@ -1377,6 +1377,57 @@ P(answer) = sum over candidates m of P(hop 1 = m) * P(answer | m).
 - On the temperature rows: scaling changes the top probability of different items by different amounts, so it can
   reorder items (AUROC changes); with 2-fold cross-fitting two different temperatures add a little noise on top.
 
+## 20. Deployment speed: SmoothQuant a8w8 and a llama.cpp feasibility probe (2026-10-12)
+
+### 20.1 SmoothQuant a8w8 on the 9B
+
+`weight_quant: a8w8sq`: int8 weights and per-token int8 activations (GemLite) after SmoothQuant scaling (Xiao et al.,
+arXiv:2211.10438): per input channel s = max|X|^alpha / max|W|^(1-alpha), activation maxima recorded on synthetic
+training-family states (`scripts/smoothquant_calibrate.py`, never a benchmark). Alpha picked on the synthetic
+validation split (300 items): a8w8 0.660; alpha 0.5 / 0.65 / 0.8: 0.681 / 0.692 / 0.689; int8 weights 0.688 -> 0.65.
+Nothing is retrained. `scripts/bench_quant.py`, Jetson AGX Orin, one fresh process per configuration:
+
+| 9B | Latency at 0.8k / 3.7k / 15k tokens | Peak memory (15k) | Typed decisions (500) | Banking77 8-way | Injection detection |
+|---|---|---|---|---|---|
+| int8 weights, eager | 3.96 / 8.05 / 22.9 s | 11.1 GB | 0.558 | 0.875 | 0.802 |
+| a8w8, eager | 1.65 / 4.04 / 15.0 s | 11.1 GB | 0.530 | 0.881 | 0.793 |
+| a8w8 + SmoothQuant, eager | 1.74 / 4.33 / 16.2 s | 11.1 GB | 0.560 | 0.881 | 0.776 |
+| int8 weights, serving path | 2.65 / 6.91 / 20.1 s | 11.1 GB | 0.552 | 0.875 | 0.810 |
+| a8w8 + SmoothQuant, serving path | 2.12 / 4.83 / 17.0 s | 11.1 GB | 0.558 | 0.881 | 0.784 |
+
+- Without smoothing, int8 activations cost 2.8 points on typed decisions; SmoothQuant recovers them. Injection
+  detection is 2.6 points lower (3 of 116 texts), inside that set's noise but in the same direction on both paths.
+- Speed: on the eager path 2.3x faster on short states, 1.4x at 15k tokens. Through the serving path (question cache
+  + tuned int8 kernels, what `load_decider` serves) the gain is 1.25x / 1.43x / 1.18x, and a8w8sq is slower there than
+  on the eager path (2.12 vs 1.74 s at 0.8k tokens): the serving path's tuning does not account for a8w8sq yet. To do.
+- Opt-in for now (`weight_quant: a8w8sq` + `smooth_path`); the default stays int8 weights.
+
+### 20.2 llama.cpp as the backbone: feasibility probe
+
+Question: can llama.cpp compute the features the 9B's trained head reads, from the same Q4_0 GGUF, without
+retraining? `scripts/llamacpp_probe/`: the 9B's VeRA adapters exported as an exactly equivalent rank-256 LoRA GGUF
+(linear-attention V heads put in the GGUF's order; unit-tested); a C++ extractor on libllama (state pass with the
+adapter off, `llama_memory_seq_cp` of the state per option row, rows with the adapter on, the residual stream after
+blocks 8 / 16 / 24 and the final norm through the eval callback, LM log-probs from the logits); the head replayed on
+those features. Banking77 8-way, 160 items:
+
+| Features | Accuracy | Same top answer as PyTorch | Mean probability TV vs PyTorch | Feature cosine L8 / L16 / L24 / final |
+|---|---|---|---|---|
+| PyTorch path (reference) | 0.875 | – | – | – |
+| llama.cpp, LoRA on rows | 0.869 | 98.8% | 0.018 | 0.997 / 0.993 / 0.987 / 0.990 |
+| llama.cpp, no adapter | 0.875 | 98.1% | 0.018 | 0.997 / 0.993 / 0.987 / 0.990 |
+
+- The head runs on llama.cpp's features as trained: one item of 160 differs. The remaining gap is numerical (Q4_0
+  kernels in llama.cpp vs dequantized int8 re-quantization in PyTorch; LM log-probs differ by 0.09 on average).
+- The adapter barely matters at inference: its output change is 0.04-0.14% of each adapted layer's output, below
+  bf16 resolution (~0.4%), so in the PyTorch path most of it is rounded away (VeRA on vs off: TV 0.0014, no top answer
+  changes on Banking77). That is also why the adapter-induced feature changes do not line up between the two
+  implementations (cosine 0.13-0.18): llama.cpp adds the delta in fp32. Consequence: a llama.cpp backend for the 9B
+  can likely drop the adapter; to confirm on the typed-decisions test before doing so.
+- Speed is not measured fairly yet: the probe decodes one option row at a time with the eval callback forcing a sync
+  per captured tensor (0.18 s per state, 0.26 s per row). Batching rows as parallel sequences is the next step.
+- Not done: the Mercurius-1-4B (its llama.cpp fork exists; same approach), and a serving integration.
+
 ## Sources for numbers not measured here
 
 Retrieved 2026-09-23. All are reported by their authors or by third parties and were not reproduced.
