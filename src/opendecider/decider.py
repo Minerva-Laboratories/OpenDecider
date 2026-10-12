@@ -77,6 +77,10 @@ def mix_answers(branch_answers: list[dict], weights: list[float], givens: list[d
     return a
 
 
+# VeRA updates smaller than this fraction of the frozen weight (Frobenius norm) are below bf16 resolution (8-bit
+# significand: relative spacing 2^-8; half of it is lost to rounding) and are left out at serving
+VERA_INERT = 2 ** -9
+
 # option rows per call from which the question cache is faster (scripts/bench_qcache_rows.py, Orin, 50 W, ~0.9k-token
 # state): about 64 on the 2B, about 12 on the 9B, where every repeated token costs ~4x more
 QCACHE_MIN_ROWS = {2048: 64, 4096: 12}
@@ -87,9 +91,21 @@ def prepare_inference_(model) -> None:
     - branched answer rows read each question's prefix once (question cache) instead of once per option row, when a
       call has at least QCACHE_MIN_ROWS option rows for this backbone (below that the extra question pass costs more
       than it saves); OPENDECIDER_QCACHE=0 turns it off, OPENDECIDER_QCACHE_MIN_ROWS overrides the threshold;
-    - int8 decoder layers on tuned fused GEMMs when this GPU has been tuned (quant.fast_int8_kernels_)."""
+    - int8 decoder layers on tuned fused GEMMs when this GPU has been tuned (quant.fast_int8_kernels_);
+    - VeRA adapters left out when their updates are below bf16 resolution (VeRA.relative_size < VERA_INERT; the 9B:
+      RESULTS 20.2); OPENDECIDER_VERA=1 keeps them, =0 always drops them. Not exact: a change below the rounding of
+      the activations it is added to."""
     from .quant import fast_int8_kernels_
     cfg = model.cfg
+    vera = getattr(model, "vera", None)
+    mode = os.environ.get("OPENDECIDER_VERA", "auto")
+    if vera is not None and mode != "1":
+        r = vera.relative_size()
+        model.vera_relative_size = r
+        if mode == "0" or r < VERA_INERT:
+            vera.remove()
+            del model.vera
+            model.vera_dropped = True
     if os.environ.get("OPENDECIDER_QCACHE", "1") != "0" and getattr(cfg, "v3_features", None) == "branched" \
             and getattr(cfg, "v3_row_format", None) == "answer":
         cfg.v3_question_cache = True

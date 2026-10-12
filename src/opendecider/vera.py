@@ -73,6 +73,27 @@ class VeRA(nn.Module):
             hit = c[key] = (A.t().to(dtype).contiguous(), getattr(self, f"B_{i}x{o}").t().to(dtype).contiguous())
         return hit
 
+    @torch.no_grad()
+    def relative_size(self, n: int = 64, seed: int = 0) -> float:
+        """Largest ||delta W x|| / ||W x|| over the adapted linears for Gaussian x. E||M x||^2 = ||M||_F^2, so this
+        estimates the Frobenius-norm ratio of the adapter's update to the frozen weight, whatever the weight's storage
+        (int8, 4-bit, bf16). Bias excluded."""
+        g = torch.Generator().manual_seed(seed)
+        worst = 0.0
+        prev, self.active = self.active, False
+        try:
+            for (mod, tag), k in zip(self.targets, [t.replace(".", "_") for _, t in self.targets]):
+                A = getattr(self, f"A_{mod.in_features}x{mod.out_features}")
+                x = torch.randn(n, mod.in_features, generator=g).to(A.device)
+                dt = next((p.dtype for p in mod.parameters() if p.is_floating_point()), torch.bfloat16)
+                w = (mod(x.to(dt)) - mod(torch.zeros_like(x[:1]).to(dt))).float()
+                d = ((x @ A.t()) * self.d[k].float()) @ getattr(self, f"B_{mod.in_features}x{mod.out_features}").t() \
+                    * self.b[k].float()
+                worst = max(worst, float(d.norm() / w.norm().clamp_min(1e-12)))
+        finally:
+            self.active = prev
+        return worst
+
     def remove(self):
         for h in self._handles:
             h.remove()
