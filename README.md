@@ -207,6 +207,7 @@ One fresh process per configuration, eager kernels. Accuracy on 500 typed-decisi
 
 | Model, weights / cache | Weights on GPU | Peak GPU memory, 0.8k / 3.7k / 15k-token state | Latency, same states | Accuracy |
 |---|---|---|---|---|
+| Mercurius-1-4B, NF4 weights / 4-bit latent cache (TurboQuant), 4k prefill slices | 2.32 GB | 2.9 / 3.1 / 3.2 GB | 1.92 / 4.48 / 16.5 s | – / 0.788 / 0.759 |
 | 9B, int8 / int8 (default; Q4_0 GGUF download, int8 on the GPU) | 8.62 GB | 9.9 / 10.0 / 11.1 GB | 3.68 / 7.52 / 21.4 s | 0.560 / 0.875 / 0.810 |
 | 9B, int8 / int4 | 8.62 GB | 9.9 / 10.0 / 11.1 GB | 3.70 / 7.55 / 21.4 s | 0.546 / 0.881 / 0.793 |
 | 9B AWQ (`opendecider-9b-awq`), int4 / int4 | 5.74 GB | 6.9 / 7.0 / 8.2 GB | 2.93 / 7.20 / 26.4 s | 0.526 / 0.887 / 0.819 |
@@ -217,7 +218,9 @@ One fresh process per configuration, eager kernels. Accuracy on 500 typed-decisi
   is 1 to 2 points below the trained 9B on knowledge-heavy multiple choice, and weaker at flagging questions about
   an unrelated state (`none` AUROC 0.71 vs 0.81).
 - A 4-bit KV cache halves the stored state (281 → 179 MB on the 9B at 15k tokens) but not the peak: the backbone has
-  only 6 attention layers with 2 KV heads.
+  only 6 attention layers with 2 KV heads. Mercurius-1-4B stores its attention state as 4-bit latent codes: 85 MB at
+  15k tokens, and the lowest peak memory here (3.2 GB at 15k tokens). Its row was measured on 2026-10-07 with the same
+  script (`scripts/bench_quant.py`, 50 W mode); typed-decisions was not run on it.
 - Option rows share one copy of the state's keys and values through fused SDPA (scores never materialized).
 
 **Serving path** (what `load_decider` runs since 2026-10-04): the question cache above a per-model number of option rows,
@@ -351,6 +354,7 @@ Design notes: [`docs/roadmap_designs.md`](docs/roadmap_designs.md),
 
 | | Minimum | Tested |
 |---|---|---|
+| GPU memory, Mercurius-1-4B | 2.9 GB for states up to about 1k tokens, 3.2 GB up to 15k (NF4 weights, 4-bit latent cache) | Jetson AGX Orin 64 GB |
 | GPU memory, 9B | 8.8 GB for states up to about 1k tokens, 10.2 GB up to 15k (int8 layers, Q4_0 tables); 4-bit (`opendecider-9b-awq`): 5.9 / 7.3 GB | Jetson AGX Orin 64 GB |
 | Disk | 9B: 5.2 GB Q4_0 GGUF + 0.1 GB checkpoint; Python environment about 6 GB | same |
 | Python | 3.12 | 3.12 on aarch64 (JetPack) |
