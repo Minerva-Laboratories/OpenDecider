@@ -185,7 +185,7 @@ each, zero-shot except where marked). OpenDecider-9B, asked directly vs decompos
 
 | Task | Accuracy | Calibration error (ECE) | Certified automatic at 2% / 5% / 10% error |
 |---|---|---|---|
-| Two-hop lookup (chained) | 0.45 → 0.90 | 0.152 → 0.044 | 0% / 0% / 0% → 0% / 1% / 53% |
+| Two-hop lookup (chained) | 0.45 → 0.90 | 0.152 → 0.044 | 0% / 0% / 0% → 0% / 1% / 53% (0% / 23% / 82% summing over hop-1 candidates) |
 | Rule over three facts (yes/no parts) | 0.98 → 1.00 | 0.077 → 0.015 | 45% / 100% / 100% → 54% / 100% / 100% |
 | "Any order over $X" (choice + code) | 0.92 → 0.99 | 0.038 → 0.048 (0.009 with a fitted temperature) | 9% / 49% / 95% → 55% / 100% / 100% |
 | Date comparison (two choices + code) | 0.70 → 0.95 | 0.085 → 0.165 (0.012 with a fitted temperature) | 0% / 0% / 2% → 34% / 95% / 100% |
@@ -210,8 +210,10 @@ Mercurius-1-4B, same items:
 - The smaller model gains more from decomposition: it is at chance on direct date comparison and well below the 9B
   on direct rules, but decomposed it is within a few points of the 9B on three of four tasks. Two-hop is the
   exception: the 4B misreads the record often enough that both hops fail together.
-- Summing hop 2 over every hop-1 candidate (one extra question per candidate, same state pass) gives up some accuracy
-  on two-hop (0.75 → 0.69) for a better ranking (AUROC 0.69 → 0.78). Details and intervals: `docs/RESULTS.md` §19.
+- Summing hop 2 over every hop-1 candidate (one extra question per candidate, same state pass) keeps hop-1 doubt in
+  the final confidence. On the 9B it costs no accuracy and raises certified automation on two-hop the most of
+  anything tried (82% at 10%, 23% at 5%; RESULTS §19.1); on the 4B it gives up some accuracy (0.75 → 0.69) for a
+  better ranking (AUROC 0.69 → 0.78). Details and intervals: `docs/RESULTS.md` §19.
 
 ### Memory and latency (Jetson AGX Orin)
 
