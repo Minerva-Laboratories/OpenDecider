@@ -232,8 +232,13 @@ One fresh process per configuration, eager kernels. Accuracy on 500 typed-decisi
 | 9B, int8 / int8 (default; Q4_0 GGUF download, int8 on the GPU) | 8.62 GB | 9.9 / 10.0 / 11.1 GB | 3.68 / 7.52 / 21.4 s | 0.560 / 0.875 / 0.810 |
 | 9B, int8 / int4 | 8.62 GB | 9.9 / 10.0 / 11.1 GB | 3.70 / 7.55 / 21.4 s | 0.546 / 0.881 / 0.793 |
 | 9B AWQ (`opendecider-9b-awq`), int4 / int4 | 5.74 GB | 6.9 / 7.0 / 8.2 GB | 2.93 / 7.20 / 26.4 s | 0.526 / 0.887 / 0.819 |
+| 9B, SmoothQuant int8 weights + int8 activations (`a8w8sq`, opt-in), serving path | 8.63 GB | 9.6 / 9.7 / 11.1 GB | 2.12 / 4.83 / 17.0 s | 0.558 / 0.881 / 0.784 |
+| 9B on llama.cpp (Q4_0 file, `--llamacpp-gguf`), serving path | 5.2 GB file | – | 2.65 / 8.80 / 33.3 s | 0.574 / 0.869 / 0.819 |
 
 - The heads were trained on int8 backbone features; untrained 4-bit variants cost a few points on some sets.
+- The last two rows are the serving path (question cache, tuned kernels; the int8 row there: 2.65 / 6.91 / 20.1 s).
+  llama.cpp matches PyTorch's accuracy with no PyTorch backbone, and is slower on long states (its prefill on the Orin
+  is ~470 tokens/s against ~770); see `docs/RESULTS.md` §20.
 - A 9B in 4 bits works when the head is fitted to it: `opendecider-9b-awq` is the 2B head stitched onto the AWQ
   weights (no 9B training). It matches the int8 stitched model on the public benchmarks (`docs/RESULTS.md` §13.6),
   is 1 to 2 points below the trained 9B on knowledge-heavy multiple choice, and weaker at flagging questions about
@@ -502,6 +507,8 @@ Environment variables:
 | `OPENDECIDER_MODELS` | `models` | Backbone download cache. |
 | `OPENDECIDER_STATE_CACHE_MB` | `2048` | Prefix cache size. `0` turns it off. |
 | `OPENDECIDER_NONE_TEXT` | `none of the above` | Text of the `none` option. Empty turns it off. |
+| `OPENDECIDER_LLAMACPP_GGUF` | – | Run the backbone in llama.cpp from this GGUF (the 9B; build `deploy/llamacpp/build.sh` first). Same as `serve --llamacpp-gguf`. |
+| `OPENDECIDER_VERA` | `auto` | VeRA adapters below bf16 resolution are left out at serving; `1` keeps them, `0` always drops them. |
 | `HOST`, `PORT` | `127.0.0.1`, `8000` | Bind address. |
 
 ## Limitations
@@ -537,7 +544,6 @@ Environment variables:
 | Area | Status |
 |---|---|
 | Prefix-cache equivalence on the new checkpoints | Planned. Current numbers are from the previous release (explanations were re-measured, `docs/RESULTS.md` §18.3). |
-| W8A8 without the accuracy loss (SmoothQuant-style calibration) | Planned. W8A8 was 2.5x faster on the 9B at 0.8k tokens but lost 5 to 6 points (`docs/RESULTS.md` §12). |
 | GPUs other than the Jetson AGX Orin | Not measured. `scripts/tune_kernels.py` prepares the fused kernels on any CUDA GPU; all memory and latency numbers are from one Orin 64 GB. |
 | GPU tests in CI | Planned. Unit tests run on CPU with a tiny random model; one GPU test covers the fused attention path. |
 | Robustness to prompt injection inside a state (not detection) | Planned. |
