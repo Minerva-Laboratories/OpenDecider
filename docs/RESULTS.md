@@ -1160,6 +1160,112 @@ target is the model's own decision. Previous rows are the earlier releases (`run
 - Times are in the Orin's 50 W mode; the earlier runs did not record their power mode, so the difference in time
   is not attributed.
 
+## 19. Multi-step questions: accuracy, calibration and certified automation (2026-10-11)
+
+Experiment plan step 2. Synthetic families whose generator knows every sub-answer (`eval/decomposition_eval.py`,
+seed 1, 600 items per family; routing's fitted combiners use a separate 600-item train split or 2-fold cross-fitting).
+Each request asks the direct question and every sub-question against the same state (questions are isolated, O3),
+so comparisons are paired. Analysis: `eval/decomposition_analysis.py`; intervals are 1,000-resample bootstraps.
+Certified automatic share: DecisionGate's Learn-then-Test (fixed-sequence testing, Clopper-Pearson, delta 10%) on
+random thirds (plan / 200 check labels / test), the same 200 splits for every score, mean share on the test third.
+
+- two_hop: "Which department does the manager of X work in?" vs "Who is X's manager?" then "Which department
+  does {manager} work in?" (chained on the chosen option).
+- routing: a stated rule ("manual review if amount > $500 and not Gold, or flagged") vs three yes/no parts
+  combined by the rule in code assuming independence; FITTED rows: logistic on the parts.
+- any_over: "Did C place any order over $X?" vs "What is C's largest order amount?" and the comparison in code.
+- date_cmp: "Is the renewal before the contract end?" vs one choice question per date and the comparison in code.
+
+### 19.1 OpenDecider-9B
+
+**Two-hop lookup (chained)** (n = 600)
+
+| Score | Accuracy | ECE | NLL | AUROC (confidence vs correct) | Certified automatic at 2% / 5% / 10% / 15% |
+|---|---|---|---|---|---|
+| direct | 0.448 [0.408, 0.487] | 0.152 [0.126, 0.198] | 1.259 | 0.621 [0.575, 0.667] | 0% / 0% / 0% / 0% |
+| direct + temperature (cross-fitted) | 0.448 [0.408, 0.487] | 0.080 [0.071, 0.135] | 1.225 | 0.625 [0.578, 0.673] | 0% / 0% / 0% / 0% |
+| decomposed | 0.897 [0.872, 0.922] | 0.044 [0.033, 0.072] | 0.370 | 0.751 [0.678, 0.819] | 0% / 1% / 53% / 85% |
+| decomposed + temperature (cross-fitted) | 0.897 [0.872, 0.922] | 0.040 [0.032, 0.069] | 0.368 | 0.736 [0.662, 0.809] | 0% / 2% / 50% / 88% |
+| decomposed, weakest part's confidence as the score | – | – | – | 0.757 [0.698, 0.807] | 0% / 7% / 61% / 97% |
+| parts certified separately at alpha/m (union bound) | – | – | – | – | 0% / 0% / 0% / 7% |
+
+- part accuracy [0.923, 0.897]
+- P(all parts right) 0.867 vs product of part accuracies 0.828
+- certified at 10% vs check labels (decomposed): 50: 13%, 100: 25%, 200: 53%
+
+**Rule over three facts** (n = 600)
+
+| Score | Accuracy | ECE | NLL | AUROC (confidence vs correct) | Certified automatic at 2% / 5% / 10% / 15% |
+|---|---|---|---|---|---|
+| direct | 0.982 [0.970, 0.992] | 0.077 [0.068, 0.087] | 0.112 | 0.993 [0.982, 1.000] | 45% / 100% / 100% / 100% |
+| direct + temperature (cross-fitted) | 0.982 [0.970, 0.992] | 0.007 [0.002, 0.015] | 0.032 | 0.993 [0.978, 1.000] | 45% / 100% / 100% / 100% |
+| decomposed | 0.997 [0.992, 1.000] | 0.015 [0.014, 0.018] | 0.023 | 0.997 [0.992, 1.000] | 54% / 100% / 100% / 100% |
+| decomposed + temperature (cross-fitted) | 0.997 [0.992, 1.000] | 0.003 [0.001, 0.007] | 0.011 | 0.987 [0.968, 1.000] | 53% / 100% / 100% / 100% |
+| fitted_logistic (FITTED, train split) | 0.997 [0.992, 1.000] | 0.080 [0.073, 0.087] | 0.094 | 0.939 [0.863, 1.000] | 49% / 100% / 100% / 100% |
+| stacked (FITTED, cross-fitted) | 0.998 [0.995, 1.000] | 0.014 [0.011, 0.017] | 0.018 | 0.997 [0.992, 1.000] | 50% / 100% / 100% / 100% |
+| decomposed, weakest part's confidence as the score | – | – | – | 0.987 [0.965, 1.000] | 51% / 100% / 100% / 100% |
+| parts certified separately at alpha/m (union bound) | – | – | – | – | 0% / 0% / 28% / 100% |
+
+- part accuracy [0.985, 1.0, 1.0]
+- P(all parts right) 0.985 vs product of part accuracies 0.985
+- LAC sets at 10%: direct coverage 0.902, singleton 0.90; propagated from parts at 10%/m coverage 0.997, singleton 1.00
+- certified at 10% vs check labels (decomposed): 50: 48%, 100: 100%, 200: 100%
+
+**Any order over $X** (n = 600)
+
+| Score | Accuracy | ECE | NLL | AUROC (confidence vs correct) | Certified automatic at 2% / 5% / 10% / 15% |
+|---|---|---|---|---|---|
+| direct | 0.918 [0.895, 0.940] | 0.038 [0.029, 0.059] | 0.210 | 0.877 [0.823, 0.920] | 9% / 49% / 95% / 99% |
+| direct + temperature (cross-fitted) | 0.918 [0.895, 0.940] | 0.026 [0.019, 0.052] | 0.203 | 0.877 [0.823, 0.920] | 9% / 49% / 95% / 99% |
+| decomposed | 0.988 [0.980, 0.997] | 0.048 [0.040, 0.057] | 0.072 | 0.993 [0.985, 0.999] | 55% / 100% / 100% / 100% |
+| decomposed + temperature (cross-fitted) | 0.988 [0.980, 0.997] | 0.009 [0.004, 0.019] | 0.107 | 0.809 [0.710, 0.911] | 64% / 100% / 100% / 100% |
+| stacked (FITTED, cross-fitted) | 0.967 [0.952, 0.980] | 0.025 [0.018, 0.038] | 0.096 | 0.947 [0.906, 0.976] | 41% / 98% / 100% / 100% |
+| decomposed, weakest part's confidence as the score | – | – | – | 0.984 [0.966, 0.998] | 55% / 100% / 100% / 100% |
+| parts certified separately at alpha/m (union bound) | – | – | – | – | 51% / 100% / 100% / 100% |
+
+- part accuracy [0.978]
+- P(all parts right) 0.978 vs product of part accuracies 0.978
+- LAC sets at 10%: direct coverage 0.905, singleton 0.98; propagated from parts at 10%/m coverage 0.991, singleton 1.00
+- certified at 10% vs check labels (decomposed): 50: 52%, 100: 100%, 200: 100%
+
+**Date comparison** (n = 600)
+
+| Score | Accuracy | ECE | NLL | AUROC (confidence vs correct) | Certified automatic at 2% / 5% / 10% / 15% |
+|---|---|---|---|---|---|
+| direct | 0.702 [0.667, 0.738] | 0.085 [0.080, 0.134] | 0.588 | 0.666 [0.619, 0.710] | 0% / 0% / 2% / 5% |
+| direct + temperature (cross-fitted) | 0.702 [0.667, 0.738] | 0.049 [0.051, 0.109] | 0.569 | 0.666 [0.619, 0.710] | 0% / 0% / 2% / 5% |
+| decomposed | 0.953 [0.937, 0.970] | 0.165 [0.152, 0.182] | 0.265 | 0.935 [0.893, 0.969] | 34% / 95% / 100% / 100% |
+| decomposed + temperature (cross-fitted) | 0.953 [0.937, 0.970] | 0.012 [0.008, 0.030] | 0.112 | 0.935 [0.892, 0.969] | 34% / 96% / 100% / 100% |
+| stacked (FITTED, cross-fitted) | 0.967 [0.953, 0.982] | 0.023 [0.018, 0.037] | 0.094 | 0.954 [0.923, 0.981] | 47% / 99% / 100% / 100% |
+| decomposed, weakest part's confidence as the score | – | – | – | 0.876 [0.827, 0.922] | 32% / 87% / 100% / 100% |
+| parts certified separately at alpha/m (union bound) | – | – | – | – | 0% / 13% / 75% / 97% |
+
+- part accuracy [0.967, 0.952]
+- P(all parts right) 0.920 vs product of part accuracies 0.920
+- LAC sets at 10%: direct coverage 0.903, singleton 0.47; propagated from parts at 10%/m coverage 0.979, singleton 0.98
+- certified at 10% vs check labels (decomposed): 50: 44%, 100: 99%, 200: 100%
+
+### 19.2 Findings (9B)
+
+- Decomposition raises accuracy on every family (two-hop 0.45 -> 0.90, dates 0.70 -> 0.95).
+- Certified automation rises most where direct confidence ranks poorly: two-hop 0% -> 53% at 10%, dates 2% -> 100%
+  at 10% and 0% -> 95% at 5%, any-over 9% -> 55% at 2%. The guarantee itself does not need decomposition (LTT on
+  final labels is valid for any score); decomposition helps by ranking right above wrong answers (AUROC).
+- Calibration: decomposed answers are better calibrated on two-hop and routing as is. The independence product is
+  overconfident on dates (ECE 0.085 -> 0.165); one temperature fitted on held-out labels brings it to 0.012. With a
+  temperature, decomposed answers are as well or better calibrated than direct ones on all four families.
+- Union-bound composition of per-part certificates is valid but loose (two-hop 0%, routing 28%, dates 75% at 10%):
+  certify the final score instead. Conformal sets propagated from the parts are conservative (coverage 98-100% at a
+  nominal 90%) and almost always a single answer; they need only part-level labels.
+- Sub-answer errors are positively correlated on two-hop (0.48), not on the other families.
+- Cross-fitted temperatures can change the ranking slightly across the two folds (any-over AUROC); certification
+  should use one temperature fitted on the plan split.
+- Literature: certification on final labels for any combined score (Angelopoulos et al., Learn then Test,
+  arXiv:2110.01052); claim-level decomposition with an output-level guarantee (Mohri & Hashimoto, arXiv:2402.10978;
+  coherent factuality, Rubin-Toles et al., arXiv:2505.17126); structured combination of LLM-proposed factors (BIRD,
+  Feng et al., arXiv:2404.12494); the compositionality gap (Press et al., arXiv:2210.03350).
+- Mercurius-1-4B and the marginalized two-hop chain (sum over hop-1 candidates): running; added when done.
+
 ## Sources for numbers not measured here
 
 Retrieved 2026-09-23. All are reported by their authors or by third parties and were not reproduced.

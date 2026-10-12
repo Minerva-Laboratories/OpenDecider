@@ -1,13 +1,13 @@
 """Smallest end-to-end test of a released checkpoint (downloads the pinned backbone on first run).
 
-    python examples/quickstart.py [checkpoints/opendecider-2b] [backbone variant]
+    python examples/quickstart.py [checkpoints/opendecider-9b] [backbone variant]
 """
 import json
 import sys
 
 from opendecider.hub import load_decider
 
-model = sys.argv[1] if len(sys.argv) > 1 else "checkpoints/opendecider-2b"
+model = sys.argv[1] if len(sys.argv) > 1 else "checkpoints/opendecider-9b"
 dec = load_decider(model, backbone=sys.argv[2] if len(sys.argv) > 2 else None)
 request = {
     "state": {"ticket": "I was charged twice for my March invoice and want my money back.",

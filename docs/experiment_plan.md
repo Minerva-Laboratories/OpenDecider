@@ -22,6 +22,9 @@ Details: `docs/v3_dense_design.md`.
 
 ## Step 2: caller-side decomposition (no text generation)
 
+Status 2026-10-11: both mechanisms are in the API and evaluated (`docs/RESULTS.md` §19): on the 9B, decomposition
+raises accuracy, calibration (with one fitted temperature) and certified automation on all four synthetic families.
+
 Motivation: an independent phishing test (BERI, jev-phishing-bench) took Jev from 62.6% with one question to 95.0%
 with 5 narrow sub-questions. Weights fitted on 1,000 labeled examples combined the sub-questions. TypeSafe's
 guidance says questions must be atomic.
