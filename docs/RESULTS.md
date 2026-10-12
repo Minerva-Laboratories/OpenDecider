@@ -1166,7 +1166,7 @@ Experiment plan step 2. Synthetic families whose generator knows every sub-answe
 seed 1, 600 items per family; routing's fitted combiners use a separate 600-item train split or 2-fold cross-fitting).
 Each request asks the direct question and every sub-question against the same state (questions are isolated, O3),
 so comparisons are paired. Analysis: `eval/decomposition_analysis.py`; intervals are 1,000-resample bootstraps.
-Certified automatic share: DecisionGate's Learn-then-Test (fixed-sequence testing, Clopper-Pearson, delta 10%) on
+Certified automatic share: Learn-then-Test (`eval/ltt.py`: fixed-sequence testing, exact binomial, delta 10%) on
 random thirds (plan / 200 check labels / test), the same 200 splits for every score, mean share on the test third.
 
 - two_hop: "Which department does the manager of X work in?" vs "Who is X's manager?" then "Which department

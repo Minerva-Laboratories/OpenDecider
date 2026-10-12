@@ -7,7 +7,7 @@ probabilities, with ground truth for the final decision and every sub-question) 
                (zero-shot combination), and both after temperature scaling (2-fold cross-fitted); routing also the
                fitted logistic. Bootstrap CIs (1,000 resamples).
   ranking      AUROC of the confidence for correctness; selective accuracy at 50% / 80% coverage.
-  certified    DecisionGate's Learn-then-Test (fixed-sequence, Clopper-Pearson) on random thirds (plan / check / test),
+  certified    Learn-then-Test (eval/ltt.py: fixed-sequence testing, exact binomial) on random thirds (plan / check / test),
                R splits: certified automatic share on the test third and its realized error, alpha 5 / 10 / 15%,
                delta 10%. Scores: direct, decomposed, decomposed + temperature, and the weakest-part confidence.
   composed     part-level certification: each of the m sub-questions certified at alpha/m on its own check labels; a
@@ -30,8 +30,8 @@ from collections import defaultdict
 
 import numpy as np
 
-sys.path.insert(0, os.environ.get("DECISIONGATE_DIR", "/home/srdelam/Desktop/DecisionGate"))
-from gateway.certify import fst_threshold, lac_qhat, plan_sequence  # noqa: E402
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from eval.ltt import fst_threshold, lac_qhat, plan_sequence  # noqa: E402
 
 ALPHAS = (0.02, 0.05, 0.10, 0.15)
 DELTA = 0.10
