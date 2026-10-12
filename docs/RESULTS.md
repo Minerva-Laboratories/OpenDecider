@@ -1422,8 +1422,10 @@ those features. Banking77 8-way, 160 items:
 - The adapter barely matters at inference: its output change is 0.04-0.14% of each adapted layer's output, below
   bf16 resolution (~0.4%), so in the PyTorch path most of it is rounded away (VeRA on vs off: TV 0.0014, no top answer
   changes on Banking77). That is also why the adapter-induced feature changes do not line up between the two
-  implementations (cosine 0.13-0.18): llama.cpp adds the delta in fp32. Consequence: a llama.cpp backend for the 9B
-  can likely drop the adapter; to confirm on the typed-decisions test before doing so.
+  implementations (cosine 0.13-0.18): llama.cpp adds the delta in fp32. Checked on the typed-decisions test (100
+  cases, 500 questions, PyTorch path, `/mnt/ext/opendecider/p8/vera_off_typed.py`): adapters on 0.558 (KL 0.306),
+  removed 0.560 (KL 0.306); Banking77 0.875 both. The 9B's VeRA adapters are inert at inference: a llama.cpp backend
+  needs none, and the PyTorch path could drop them too (their row-pass matmuls and hooks cost time; not measured).
 - Speed is not measured fairly yet: the probe decodes one option row at a time with the eval callback forcing a sync
   per captured tensor (0.18 s per state, 0.26 s per row). Batching rows as parallel sequences is the next step.
 - Not done: the Mercurius-1-4B (its llama.cpp fork exists; same approach), and a serving integration.
