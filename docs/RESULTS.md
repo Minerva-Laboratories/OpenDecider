@@ -1377,7 +1377,23 @@ P(answer) = sum over candidates m of P(hop 1 = m) * P(answer | m).
 - On the temperature rows: scaling changes the top probability of different items by different amounts, so it can
   reorder items (AUROC changes); with 2-fold cross-fitting two different temperatures add a little noise on top.
 
-## 20. Deployment speed: SmoothQuant a8w8 and a llama.cpp feasibility probe (2026-10-12)
+### 19.5 Marginal chaining as the API default; where two-hop's remaining errors are
+
+Chained questions (`{name}` in a prompt) are now asked once per possible answer of the question they reference and
+mixed by those answers' probabilities (`"chain": "marginal"`, the default; `"top"` substitutes the top answer only);
+each answer lists its branches under `chain.branches` so a caller can recalibrate each step (for example one
+temperature per step, fitted on final-answer labels). Tested equal to asking each substitution separately and mixing
+by hand.
+
+Where the 9B's two-hop errors are (600 items, accuracy 0.893): 39 of the 64 are hop-2 lookups for the RIGHT manager,
+confident (median 0.75, 90th percentile 0.93, against 0.97 for correct lookups); 25 come from a wrong hop-1 manager,
+and those are low-confidence (median 0.57) so the mixture already discounts them. Certified automation at a 5% bound
+(23%, 19.1) is limited by those confident hop-2 errors; at 10% (82%) it is close to the ceiling (~99% with 11%
+errors).
+Recalibrations that keep the ranking cannot separate them; a second look at hop 2 (another option order, a yes/no check
+of the chosen department) is the next thing to try.
+
+## 20. Deployment speed: SmoothQuant a8w8, llama.cpp, VeRA (2026-10-12)
 
 ### 20.1 SmoothQuant a8w8 on the 9B
 
@@ -1429,6 +1445,41 @@ those features. Banking77 8-way, 160 items:
 - Speed is not measured fairly yet: the probe decodes one option row at a time with the eval callback forcing a sync
   per captured tensor (0.18 s per state, 0.26 s per row). Batching rows as parallel sequences is the next step.
 - Not done: the Mercurius-1-4B (its llama.cpp fork exists; same approach), and a serving integration.
+
+### 20.3 llama.cpp serving backend for the 9B
+
+`src/opendecider/llamacpp.py` + `deploy/llamacpp/od_llama.cpp` (`serve --llamacpp-gguf FILE` or
+`OPENDECIDER_LLAMACPP_GGUF`): the backbone runs in llama.cpp from the Q4_0 GGUF, the trained head in PyTorch, no
+PyTorch backbone weights loaded, no adapter. One llama.cpp context with a unified KV cache: the state runs once in
+sequence 0 and is kept until a different state arrives; each question runs once from the state in its own sequence,
+then its option rows fork from it (`llama_memory_seq_cp`: shared KV cells, copied recurrent state) and run as one
+batch padded to a common length (padding after a row's real tokens changes nothing before it). Features and LM
+log-probs as in 20.2. `scripts/llamacpp_probe/backend_check.py`, Orin, 50 W:
+
+| | llama.cpp backend | PyTorch int8, serving path (20.1) |
+|---|---|---|
+| Banking77 8-way (160) | 0.869 (same top answer as PyTorch on 98.8%) | 0.875 |
+| typed decisions (100 cases, 500 questions) | 0.574 | 0.552 |
+| prompt injections (116) | 0.819 | 0.810 |
+| latency, 20 / 100 / 400 records (0.8k / 3.8k / 14.7k tokens) | 2.65 / 8.80 / 33.3 s | 2.65 / 6.91 / 20.1 s |
+| same state asked again | 0.90 / 0.90 / 1.01 s | (cross-request state cache) |
+| backbone weights | 5.2 GB (Q4_0 file) | 8.6 GB (int8) |
+
+- Equal accuracy; equal latency on short states, slower on long ones: llama.cpp's prefill on this GPU is ~470 tokens/s
+  for this file (`llama-bench` pp2048; Q8_0 re-quantized from the same weights: 508), against ~770 for PyTorch's tuned
+  int8 GEMMs. The state pass dominates long states.
+- The question cache matters: rows that repeat the question cost 1.05 s for 11 options against 0.65 s with it
+  (features equal: cosine >= 0.96 per layer, log-probs within 0.05 on average; batch-shape rounding).
+- Use it where the smaller file or a PyTorch-free backbone matters (memory, other hardware); on the Orin the PyTorch
+  path stays the default.
+
+### 20.4 VeRA left out at serving
+
+`decider.prepare_inference_` measures each adapter's update relative to its frozen weight (Frobenius norm, estimated on
+Gaussian inputs, any weight storage) and leaves the adapters out below bf16 spacing (2^-8; `OPENDECIDER_VERA=1` keeps
+them, `=0` always drops). The 9B's measure 0.0019. Serving path with them dropped: typed decisions 0.560 (with them
+0.552), Banking77 0.875, injections 0.810 (same); latency 2.57 / 7.04 / 20.6 s (with them 2.65 / 6.91 / 20.1): no
+speed change, the adapters' matmuls are small next to the backbone's.
 
 ## Sources for numbers not measured here
 
