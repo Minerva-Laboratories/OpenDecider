@@ -198,7 +198,20 @@ each, zero-shot except where marked). OpenDecider-9B, asked directly vs decompos
 - Certifying each part separately and adding the bounds (union bound) certifies much less than certifying the final
   answer (two-hop 0%, rule 28%, dates 75% at 10%). Conformal sets propagated from the parts cover the right answer
   98-100% of the time at a 10% level and are a single answer for 98-100% of cases (direct sets: 47% on dates).
-- Mercurius-1-4B: being measured. Details and intervals: `docs/RESULTS.md` §19.
+Mercurius-1-4B, same items:
+
+| Task | Accuracy | Calibration error (ECE) | Certified automatic at 2% / 5% / 10% error |
+|---|---|---|---|
+| Two-hop lookup (chained) | 0.36 → 0.75 | 0.215 → 0.111 | 0% / 0% / 0% → 0% / 0% / 1% (12% at 10%, summing over hop-1 candidates) |
+| Rule over three facts (yes/no parts) | 0.77 → 0.97 | 0.090 → 0.017 | 0% / 31% / 57% → 39% / 97% / 100% |
+| "Any order over $X" (choice + code) | 0.84 → 0.98 | 0.044 → 0.042 (0.006 with a fitted temperature) | 0% / 19% / 61% → 58% / 100% / 100% |
+| Date comparison (two choices + code) | 0.51 → 0.89 | 0.259 → 0.151 (0.038 with a fitted temperature) | 0% / 0% / 0% → 2% / 13% / 71% |
+
+- The smaller model gains more from decomposition: it is at chance on direct date comparison and well below the 9B
+  on direct rules, but decomposed it is within a few points of the 9B on three of four tasks. Two-hop is the
+  exception: the 4B misreads the record often enough that both hops fail together.
+- Summing hop 2 over every hop-1 candidate (one extra question per candidate, same state pass) gives up some accuracy
+  on two-hop (0.75 → 0.69) for a better ranking (AUROC 0.69 → 0.78). Details and intervals: `docs/RESULTS.md` §19.
 
 ### Memory and latency (Jetson AGX Orin)
 
