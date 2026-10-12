@@ -350,6 +350,9 @@ class V3(DecisionModel):
         [question ; opt_1 ; ... ; opt_K] continuing from its state's cache. Returns flat dense features and
         CPU lengths laid out exactly like the isolated path: (s_flat, s_lens, q_flat, q_lens, o_flat, o_lens)."""
         bb, dev = self.backbone, self.backbone.device
+        if getattr(bb, "is_llamacpp", False):              # backbone in llama.cpp (opendecider.llamacpp)
+            from .llamacpp import branched_feats
+            return branched_feats(self, questions, mem)
         if getattr(mem, "prefix_batch", None) is None:
             mem.prefix_batch = self._state_prefix(mem)
         pc, smask, sh = mem.prefix_batch

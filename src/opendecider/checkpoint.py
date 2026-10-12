@@ -38,9 +38,16 @@ def load_model(path: str, backbone: Backbone | None = None, device: str | None =
     return model.to(bb.device).eval(), ck.get("extra", {})
 
 
-def load_decider(path: str):
+def load_decider(path: str, llamacpp_gguf: str | None = None):
+    """llamacpp_gguf (or OPENDECIDER_LLAMACPP_GGUF): run the backbone in llama.cpp from this GGUF file
+    (opendecider.llamacpp; branched-row checkpoints such as the 9B)."""
     from .decider import Decider, prepare_inference_
-    model, extra = load_model(path)
-    prepare_inference_(model)
+    gguf = llamacpp_gguf or os.environ.get("OPENDECIDER_LLAMACPP_GGUF")
+    if gguf:
+        from .llamacpp import load_model as load_llamacpp
+        model, extra = load_llamacpp(path, gguf)
+    else:
+        model, extra = load_model(path)
+        prepare_inference_(model)
     return Decider(model, temperature=extra.get("temperature", 1.0),
                    temperature_by_type=extra.get("temperature_by_type"), conformal=extra.get("conformal"))

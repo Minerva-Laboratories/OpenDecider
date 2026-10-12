@@ -25,3 +25,4 @@ CLAUDE.md
 
 # local job-queue helpers (machine-specific)
 scripts/queue_*.sh
+deploy/llamacpp/build/

@@ -18,10 +18,13 @@ def _build(a):
     from .api import create_app
     from .hub import load_decider
     key = open(os.path.expanduser(a["api_key_file"])).read().strip() if a["api_key_file"] else None
+    if a.get("llamacpp_gguf"):
+        os.environ["OPENDECIDER_LLAMACPP_GGUF"] = os.path.abspath(a["llamacpp_gguf"])
     dec = load_decider(a["model"], backbone=a["backbone"], device=a["device"], kv_quant=a["kv_quant"])
     if a["warmup"]:
         dec.decide({"state": "warm-up", "questions": {"w": {"type": "noul", "prompt": "Is this a warm-up?"}}})
-    info = {"model": os.path.basename(os.path.normpath(a["model"])), "backbone": a["backbone"] or "default",
+    info = {"model": os.path.basename(os.path.normpath(a["model"])), "backbone": ("llama.cpp " + os.path.basename(a["llamacpp_gguf"])) if a.get("llamacpp_gguf")
+                else (a["backbone"] or "default"),
             "kv_quant": a["kv_quant"] or "default", "max_batch": a["max_batch"]}
     return create_app(dec, api_key=key, log_dir=a["log_dir"], info=info, max_batch=a["max_batch"],
                       max_batch_tokens=a["max_batch_tokens"])
@@ -33,6 +36,9 @@ def main(argv=None):
     ap.add_argument("--backbone", default=None, help="backbone variant from the checkpoint's config.json")
     ap.add_argument("--kv-quant", default=None, choices=["none", "int8", "int4"])
     ap.add_argument("--device", default=None, help="cuda (default when available) or cpu")
+    ap.add_argument("--llamacpp-gguf", default=None,
+                    help="run the backbone in llama.cpp from this GGUF (branched-row models such as the 9B; "
+                         "opendecider.llamacpp, deploy/llamacpp/build.sh)")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8000)
     ap.add_argument("--api-key-file", default=None, help="file holding the API key (required off localhost)")

@@ -143,8 +143,10 @@ def load_model(path_or_repo: str, backbone: str | None = None, device: str | Non
     bspec["device"] = device
     if kv_quant:
         bspec["kv_quant"] = kv_quant
-    bb = Backbone.load(BackboneConfig(**bspec))
-    model = build_model(bb, ModelConfig(**cfg["model_cfg"]))
+    gguf = os.environ.get("OPENDECIDER_LLAMACPP_GGUF")
+    if not gguf:
+        bb = Backbone.load(BackboneConfig(**bspec))
+        model = build_model(bb, ModelConfig(**cfg["model_cfg"]))
     sd, parts = {}, {}
     for f in sorted(set(cfg["weight_map"].values())):
         with safe_open(os.path.join(d, f), "pt") as h:
@@ -156,6 +158,9 @@ def load_model(path_or_repo: str, backbone: str | None = None, device: str | Non
                     sd[k] = t
     for k, ps in parts.items():
         sd[k] = torch.cat([t for _, t in sorted(ps)], 0)
+    if gguf:                                  # backbone in llama.cpp (opendecider.llamacpp)
+        from .llamacpp import build
+        return build(bspec, cfg["model_cfg"], sd, gguf, device), cfg.get("extra", {})
     missing, unexpected = model.load_state_dict(sd, strict=False)
     bad = [k for k in missing if not k.startswith("backbone.")]
     if bad or unexpected:
@@ -167,6 +172,7 @@ def load_decider(path_or_repo: str, backbone: str | None = None, device: str | N
                  kv_quant: str | None = None, revision: str | None = None):
     from .decider import Decider, prepare_inference_
     model, extra = load_model(path_or_repo, backbone, device, kv_quant, revision)
-    prepare_inference_(model)
+    if not getattr(model.backbone, "is_llamacpp", False):
+        prepare_inference_(model)
     return Decider(model, temperature=extra.get("temperature", 1.0),
                    temperature_by_type=extra.get("temperature_by_type"), conformal=extra.get("conformal"))

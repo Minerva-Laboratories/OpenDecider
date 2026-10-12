@@ -366,7 +366,8 @@ class Decider:
             pc = None
             # state-token features are only read by the trunk when it cross-attends to the state; with
             # v3_cross='question' the row pass needs the LLM cache alone, which is what gets cached
-            if mb > 0 and getattr(self.model, "state_free", False):
+            if mb > 0 and getattr(self.model, "state_free", False) and \
+                    not getattr(self.model.backbone, "is_llamacpp", False):     # llama.cpp keeps its own state
                 from .state_cache import PrefixCache
                 pc = PrefixCache(self.model.backbone, max_bytes=mb << 20)
             self.__dict__["_pcache"] = pc
