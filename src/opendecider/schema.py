@@ -37,6 +37,9 @@ class _Q(BaseModel):
     instructions: str | None = None          # exact conditions / boundary cases, read with the question
     calibration: str | None = None           # id of a fitted calibration profile (POST /v1/calibrate)
     none: bool | None = None                 # report P(none) (models with the `none` sink); False: closed world
+    # chaining ({other} in the prompt): "marginal" asks the question once per possible answer of the referenced
+    # question(s) and mixes the results by their probabilities; "top" substitutes the top answer only
+    chain: Literal["marginal", "top"] = "marginal"
 
 
 class ChoiceQ(_Q):

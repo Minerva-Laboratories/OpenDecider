@@ -20,13 +20,61 @@ from .heads import two_stage_select
 from .models import DecisionModel
 from .options import MAX_OPTIONS
 from .sampler import SamplerConfig, run_sampler
-from .schema import REF, DecideRequest, opt_name, opt_text, waves
+from .schema import REF, DecideRequest, opt_name, opt_text, refs_of, waves
 
 
 def _normalize(p: torch.Tensor) -> list[float]:
     p = p.double().clamp_min(0)
     p = p / p.sum()
     return p.tolist()
+
+
+# marginal chaining: joint assignments of the referenced answers asked per question (heaviest first), and the weight
+# below which an assignment is dropped (the heaviest is always kept); the mixture is renormalized over those kept
+CHAIN_MAX_BRANCHES = 32
+CHAIN_MIN_WEIGHT = 1e-4
+
+
+def chain_branches(refs: list[str], answers: dict) -> list[tuple[dict, float]]:
+    """[(given {ref: option name}, weight)] for marginal chaining: weight = product of the referenced answers'
+    probabilities (upstream answers treated as independent given the state), heaviest first."""
+    out = [({}, 1.0)]
+    for r in refs:
+        probs = answers[r]["probs"]
+        out = sorted(((dict(g, **{r: v}), w * float(p)) for g, w in out for v, p in probs.items()),
+                     key=lambda t: -t[1])[:CHAIN_MAX_BRANCHES]
+    return out[:1] + [b for b in out[1:] if b[1] >= CHAIN_MIN_WEIGHT]
+
+
+def mix_answers(branch_answers: list[dict], weights: list[float], givens: list[dict]) -> dict:
+    """One answer from the same question asked under several substitutions: probabilities mixed by the branch
+    weights (renormalized). `chain` lists every branch; `std` is the within-branch sampler spread, sqrt(sum w sd^2)."""
+    tot = sum(weights)
+    w = [x / tot for x in weights]
+    a0 = branch_answers[0]
+    names = list(a0["probs"])
+    probs = [sum(wk * a["probs_list"][j] for wk, a in zip(w, branch_answers)) for j in range(len(names))]
+    s = sum(probs); probs = [p / s for p in probs]
+    K = len(names); pmax = max(probs)
+    a = {"value": names[max(range(K), key=probs.__getitem__)],
+         "confidence": max(0.0, min(1.0, (K * pmax - 1) / (K - 1))) if K > 1 else 1.0,
+         "probs": dict(zip(names, probs)), "probs_list": probs}
+    if "std" in a0:
+        a["std"] = {n: math.sqrt(sum(wk * b["std"][n] ** 2 for wk, b in zip(w, branch_answers))) for n in names}
+    if "none" in a0:
+        a["none"] = sum(wk * b["none"] for wk, b in zip(w, branch_answers))
+        if a["none"] > pmax:
+            a["value"] = "none"
+    if "p_yes" in a0:
+        a["p_yes"] = probs[0] if "parts" not in a0 else a["probs"]["yes"]
+    if "expected_index" in a0:
+        a["expected_index"] = sum(k * p for k, p in enumerate(probs))
+    if "parts" in a0:                                   # composite: the parts of the heaviest branch
+        a["parts"] = a0["parts"]
+    a["chain"] = {"mode": "marginal", "covered": tot,
+                  "branches": [{"given": g, "weight": wk, "probs_list": b["probs_list"]}
+                               for g, wk, b in zip(givens, w, branch_answers)]}
+    return a
 
 
 # option rows per call from which the question cache is faster (scripts/bench_qcache_rows.py, Orin, 50 W, ~0.9k-token
@@ -99,6 +147,40 @@ class Decider:
         q.calibration = spec.calibration
         q.none = spec.none
         return q
+
+    def _expand(self, name: str, spec, answers: dict, tag: str) -> tuple[list[Question], list]:
+        """Questions for one top-level question in its wave. Chained questions in marginal mode get one copy per
+        joint assignment of the referenced answers (chain_branches). -> (questions, branches), branches =
+        [(given or None, weight, tag of that branch)]."""
+        refs = sorted(refs_of(spec))
+        if refs and spec.chain == "marginal":
+            br = [(g, w, f"{tag}\x1e{k}") for k, (g, w) in enumerate(chain_branches(refs, answers))]
+        else:
+            br = [(None, 1.0, tag)]
+        qs = []
+        for g, _, t in br:
+            ans = answers if g is None else {**answers, **{r: {"value": v} for r, v in g.items()}}
+            if spec.type == "composite":
+                qs += [self._atomic(f"{t}.{pn}", ps, ans) for pn, ps in spec.parts.items()]
+            else:
+                qs.append(self._atomic(t, spec, ans))
+        return qs, br
+
+    def _collect(self, spec, branches, got: dict, conformal=None, qmap=None) -> dict:
+        """The answer of one top-level question from the batch results of its branches."""
+        outs = [self._combine(spec, {pn: got[f"{t}.{pn}"] for pn in spec.parts}) if spec.type == "composite"
+                else got[t] for _, _, t in branches]
+        if branches[0][0] is None:
+            return outs[0]
+        a = mix_answers(outs, [w for _, w, _ in branches], [g for g, _, _ in branches])
+        if conformal is not None and spec.type != "composite" and qmap is not None:
+            from .conformal import prediction_set, threshold
+            q = qmap[branches[0][2]]
+            thr = threshold(self._conformal_scores(q, conformal.method), conformal.alpha)
+            names = list(a["probs"])
+            a["set"] = [names[j] for j in prediction_set(a["probs_list"], thr, conformal.method)]
+            a["abstain"] = len(a["set"]) != 1 or a["value"] == "none"
+        return a
 
     def _context_prefix(self, req) -> str:
         """Render request-level examples in the model's own question schema (answer filled or empty)."""
@@ -317,21 +399,15 @@ class Decider:
         answers, n_tok = {}, 0
         plan = waves(req.questions)
         for wave in plan:
-            batch = []
+            batch, branches = [], {}
             for name in wave:
-                spec = req.questions[name]
-                if spec.type == "composite":
-                    batch += [self._atomic(f"{name}.{pn}", ps, answers) for pn, ps in spec.parts.items()]
-                else:
-                    batch.append(self._atomic(name, spec, answers))
+                qs, branches[name] = self._expand(name, req.questions[name], answers, name)
+                batch += qs
             got, nt = self._answer_batch(batch, mem, sampler, req.conformal)
             n_tok += nt
+            qmap = {q.name: q for q in batch}
             for name in wave:
-                spec = req.questions[name]
-                if spec.type == "composite":
-                    answers[name] = self._combine(spec, {pn: got[f"{name}.{pn}"] for pn in spec.parts})
-                else:
-                    answers[name] = got[name]
+                answers[name] = self._collect(req.questions[name], branches[name], got, req.conformal, qmap)
         sync(); t_end = time.perf_counter()
         return {"answers": {k: answers[k] for k in req.questions},
                 "timing_ms": {"state": 1e3 * (t_state - t0), "questions": 1e3 * (t_end - t_state),
@@ -364,14 +440,11 @@ class Decider:
         n_tok = [0] * len(reqs)
         plans = [waves(r.questions) for r in reqs]
         for w in range(max(map(len, plans))):
-            batch, owner = [], []
+            batch, owner, branches = [], [], {}
             for i, (r, plan) in enumerate(zip(reqs, plans)):
                 for name in (plan[w] if w < len(plan) else []):
-                    spec = r.questions[name]
-                    parts = ([(f"{name}.{pn}", ps) for pn, ps in spec.parts.items()] if spec.type == "composite"
-                             else [(name, spec)])
-                    for qn, ps in parts:
-                        q = self._atomic(f"{i}\x1f{qn}", ps, answers[i])
+                    qs, branches[i, name] = self._expand(name, r.questions[name], answers[i], f"{i}\x1f{name}")
+                    for q in qs:
                         q.state_idx = i
                         batch.append(q)
                         owner.append(i)
@@ -380,13 +453,10 @@ class Decider:
             got, _ = self._answer_batch(batch, mem, sampler, r0.conformal)
             for q, i in zip(batch, owner):
                 n_tok[i] += sum(len(t) for t in self.model.backbone.tokenize([q.prompt] + q.options))
+            qmap = {q.name: q for q in batch}
             for i, (r, plan) in enumerate(zip(reqs, plans)):
                 for name in (plan[w] if w < len(plan) else []):
-                    spec = r.questions[name]
-                    if spec.type == "composite":
-                        answers[i][name] = self._combine(spec, {pn: got[f"{i}\x1f{name}.{pn}"] for pn in spec.parts})
-                    else:
-                        answers[i][name] = got[f"{i}\x1f{name}"]
+                    answers[i][name] = self._collect(r.questions[name], branches[i, name], got, r0.conformal, qmap)
         sync(); t_end = time.perf_counter()
         timing = {"state": 1e3 * (t_state - t0), "questions": 1e3 * (t_end - t_state), "total": 1e3 * (t_end - t0),
                   "waves": max(map(len, plans)), "batch": len(reqs)}

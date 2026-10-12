@@ -169,6 +169,12 @@ A hard question can be split into narrow ones that the model answers well, still
 puts an earlier answer into a later prompt; a `composite` question combines yes/no parts into one probability; and
 arithmetic or comparisons stay in your code over the parts' probabilities.
 
+A chained question is asked once per possible answer of the question it references, and its probabilities are those
+answers mixed by their probabilities (`"chain": "marginal"`, the default; up to 32 joint assignments, heaviest first,
+dropping those under 1e-4). The answer lists every branch under `chain.branches` (what was substituted, its weight and
+the probabilities given it), so a caller can recalibrate each step. `"chain": "top"` substitutes the top answer only:
+one question instead of one per candidate, but the first step's doubt is lost.
+
 ```json
 "questions": {
   "manager": {"type": "choice", "prompt": "Who is Ana Silva's manager?", "options": ["Ben Ito", "Chloe Weber", "..."]},

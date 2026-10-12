@@ -48,3 +48,32 @@ def test_fit_logistic_recovers_rule():
         labels.append(int(a + b > 1.0))
     spec = fit_logistic(parts, labels, ["a", "b"])
     assert spec["weights"]["a"] > 2 and spec["weights"]["b"] > 2 and spec["bias"] < -1
+
+
+def test_marginal_chaining_mixes_over_referenced_answers(bb):
+    """Default chaining: P(followup) = sum_t P(team = t) P(followup | team = t); "top" substitutes the top answer."""
+    d = Decider(make(bb, "v1"))
+    team = {"type": "choice", "prompt": "Which team?", "options": OPTS}
+    res = d.decide({"state": STATE, "questions": {
+        "team": team, "followup": {"type": "noul", "prompt": "Should {team} reply within a day?"},
+        "top": {"type": "noul", "prompt": "Should {team} reply within a day?", "chain": "top"}}})
+    a = res["answers"]
+    pt = a["team"]["probs"]
+    alone = {t: d.decide({"state": STATE, "questions": {"q": {"type": "noul", "prompt": f"Should {t} reply within a day?"}}})
+             ["answers"]["q"]["p_yes"] for t in pt}
+    want = sum(pt[t] * alone[t] for t in pt)
+    f = a["followup"]
+    assert len(f["chain"]["branches"]) == len(OPTS) and abs(f["chain"]["covered"] - 1) < 1e-9
+    assert abs(f["p_yes"] - want) < 1e-4 and abs(sum(f["probs"].values()) - 1) < 1e-9
+    assert "chain" not in a["top"] and abs(a["top"]["p_yes"] - alone[a["team"]["value"]]) < 1e-4
+    many = d.decide_many([{"state": STATE, "questions": {"team": team, "followup": {"type": "noul",
+                                                                                    "prompt": "Should {team} reply within a day?"}}}] * 2)
+    assert all(abs(m["answers"]["followup"]["p_yes"] - want) < 1e-4 for m in many)
+
+
+def test_chain_branches_cap_and_order():
+    from opendecider import decider as D
+    ans = {"a": {"probs": {"x": 0.7, "y": 0.29999, "z": 0.00001}}, "b": {"probs": {"u": 0.5, "v": 0.5}}}
+    br = D.chain_branches(["a", "b"], ans)
+    assert [w for _, w in br] == sorted([w for _, w in br], reverse=True)
+    assert all(g["a"] != "z" for g, _ in br) and len(br) == 4          # z * 0.5 < CHAIN_MIN_WEIGHT
