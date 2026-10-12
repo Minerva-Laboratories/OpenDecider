@@ -16,7 +16,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from .quant import gemlite_a8w8_, gemlite_quantize_, quantize_int8_, quantize_table
+from .quant import gemlite_a8w8_, gemlite_quantize_, quantize_int8_, quantize_table, smooth_a8w8_
 
 
 def _reorder_v_heads(t: torch.Tensor, dim: int, n_a: int, n_b: int, head: int) -> torch.Tensor:
@@ -95,7 +95,8 @@ def _convert(name: str, x: torch.Tensor, shape, c) -> torch.Tensor:
 
 @torch.no_grad()
 def load_qwen35_gguf(gguf_path: str, config_dir: str, device: str = "cuda", dtype=torch.bfloat16,
-                     weight_quant: str = "int8", awq_params: dict | None = None, table_quant: str = "int8") -> nn.Module:
+                     weight_quant: str = "int8", awq_params: dict | None = None, table_quant: str = "int8",
+                     smooth: dict | None = None) -> nn.Module:
     """(text model: embed_tokens, layers, norm; untied LM head or None) from a GGUF file."""
     import gguf
     from transformers import AutoConfig
@@ -127,6 +128,9 @@ def load_qwen35_gguf(gguf_path: str, config_dir: str, device: str = "cuda", dtyp
             gemlite_quantize_(layer, 4 if weight_quant == "w4" else 8)
         elif weight_quant == "a8w8":
             gemlite_a8w8_(layer)
+        elif weight_quant == "a8w8sq":                        # SmoothQuant scales, names relative to lm.layers
+            pre = f"{i}."
+            smooth_a8w8_(layer, {k[len(pre):]: v for k, v in smooth.items() if k.startswith(pre)})
         elif weight_quant == "awq4":
             from .awq import apply_awq_
             pre = f"{i}."

@@ -65,3 +65,24 @@ def test_fused_kernels_keep_module_objects_and_hooks():
     assert net[0] is lin and lin.qweight.numel() == 0
     y1 = net(x).float()
     assert (y1 - 100.0).abs().mean() < 50 and ((y1 - y0).norm() / y0.norm()).item() < 1e-2
+
+
+def test_smoothquant_wrapper_is_exact_math():
+    """SmoothedLinear(inner with W*s)(x) == the original linear(x); scales follow max|X|^a / max|W|^(1-a)."""
+    import torch
+    import torch.nn as nn
+    from opendecider.quant import SmoothedLinear, smooth_scales
+    torch.manual_seed(0)
+    lin = nn.Linear(16, 8, bias=True).double()
+    x = torch.randn(32, 16, dtype=torch.float64) * torch.logspace(-1, 2, 16, dtype=torch.float64)   # outlier channels
+    s = smooth_scales(x.abs().amax(0), lin.weight.data, 0.5).double()
+    assert torch.allclose(s, (x.abs().amax(0) ** 0.5 / lin.weight.abs().amax(0) ** 0.5).clamp(1e-3, 1e3), rtol=1e-4)
+    inner = nn.Linear(16, 8, bias=True).double()
+    inner.weight.data = lin.weight.data * s[None, :]
+    inner.bias.data = lin.bias.data.clone()
+    sm = SmoothedLinear(inner, s)
+    sm.inv_s = (1.0 / s)                                                  # float64 for the exactness check
+    assert torch.allclose(sm(x), lin(x), atol=1e-10)
+    # smoothing flattens the activation range across channels (what makes per-token int8 easier)
+    xs = x / s
+    assert xs.abs().amax(0).max() / xs.abs().amax(0).min() < x.abs().amax(0).max() / x.abs().amax(0).min()

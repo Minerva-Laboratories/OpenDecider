@@ -314,6 +314,48 @@ def gemlite_a8w8_(module: nn.Module) -> nn.Module:
     return module
 
 
+class SmoothedLinear(nn.Module):
+    """y = inner(x / s) with inner holding W * s (per input channel): the same product, with activation outliers moved
+    into the weights before int8 quantization (SmoothQuant, Xiao et al. 2023, arXiv:2211.10438). The division is one
+    elementwise op per layer (not folded into the preceding norm, so it works for every linear the same way)."""
+
+    def __init__(self, inner: nn.Module, s: torch.Tensor):
+        super().__init__()
+        self.inner = inner
+        self.register_buffer("inv_s", (1.0 / s).to(torch.bfloat16))
+        self.in_features, self.out_features = inner.in_features, inner.out_features
+
+    def forward(self, x):
+        return self.inner(x * self.inv_s.to(x.dtype))
+
+
+@torch.no_grad()
+def smooth_a8w8_(module: nn.Module, scales: dict, prefix: str = "") -> nn.Module:
+    """Every nn.Linear under `module` whose name (relative to it) has a scale vector: W *= s per input channel, then
+    GemLite A8W8, wrapped to divide its input by s. Linears without scales get plain A8W8."""
+    from gemlite.helper import A8W8_int8_dynamic
+    for name, child in list(module.named_children()):
+        full = f"{prefix}{name}"
+        if isinstance(child, nn.Linear):
+            K, N = child.in_features, child.out_features
+            s = scales.get(full)
+            if s is not None:
+                s = s.to(child.weight.device, torch.float32)
+                child.weight.data = (child.weight.data.float() * s[None, :]).to(child.weight.dtype)
+            q = A8W8_int8_dynamic(device=str(child.weight.device), dtype=child.weight.dtype).from_linear(child)
+            q.in_features, q.out_features = K, N
+            setattr(module, name, q if s is None else SmoothedLinear(q, s))
+        else:
+            smooth_a8w8_(child, scales, f"{full}.")
+    return module
+
+
+def smooth_scales(amax_x: torch.Tensor, W: torch.Tensor, alpha: float = 0.5) -> torch.Tensor:
+    """SmoothQuant per-input-channel scales s_j = max|X_j|^alpha / max|W_:,j|^(1-alpha) (clamped)."""
+    aw = W.abs().amax(0).float().clamp(min=1e-5)
+    return (amax_x.float().clamp(min=1e-5) ** alpha / aw ** (1 - alpha)).clamp(1e-3, 1e3)
+
+
 # ---------------------------------------------------------------- fused int8 inference GEMMs (same weights)
 def int8_to_gemlite(m: Int8Linear) -> nn.Module:
     """Int8Linear -> GemLite A16W8 holding the SAME int8 weights (stored as uint8 q+128 with zero point 128, one group

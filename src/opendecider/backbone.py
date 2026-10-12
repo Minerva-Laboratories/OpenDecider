@@ -16,7 +16,7 @@ import torch
 import torch.nn as nn
 import yaml
 
-from .quant import (Int8Tensor, gemlite_a8w8_, gemlite_quantize_, kv_mode, materialize, maybe_quantize, quantize_int8_,
+from .quant import (Int8Tensor, gemlite_a8w8_, smooth_a8w8_, gemlite_quantize_, kv_mode, materialize, maybe_quantize, quantize_int8_,
                     quantize_table)
 
 
@@ -33,6 +33,7 @@ class BackboneConfig:
     quantize_linear_state: bool = False  # GDN recurrent/conv state (not a KV cache)
     feature_layers: list = field(default_factory=lambda: ["final"])  # "final" = post-norm last layer, or ints 1..L
     awq_path: str = ""                  # weight_quant=awq4: calibrated scales (scripts/awq_calibrate.py)
+    smooth_path: str = ""               # weight_quant=a8w8sq: SmoothQuant scales (scripts/smoothquant_calibrate.py)
     prefill_chunk: int = 0              # state pass in chunks of this many tokens; 0 = one pass. Qwen 4B NF4 at 15k
                                         # (Orin): 4096 -> peak 4.78 -> 3.51 GB, latency +27%. Mercurius defaults to 4096
     device: str = "cuda"
@@ -104,7 +105,8 @@ class Backbone(nn.Module):
             from .gguf_load import load_qwen35_gguf
             d = os.path.dirname(cfg.path)
             awq = torch.load(cfg.awq_path, weights_only=False)["params"] if cfg.weight_quant == "awq4" else None
-            lm, head = load_qwen35_gguf(cfg.path, d, cfg.device, dtype, cfg.weight_quant, awq, cfg.table_quant)
+            smooth = torch.load(cfg.smooth_path, weights_only=False)["scales"] if cfg.weight_quant == "a8w8sq" else None
+            lm, head = load_qwen35_gguf(cfg.path, d, cfg.device, dtype, cfg.weight_quant, awq, cfg.table_quant, smooth)
             return cls(lm, AutoTokenizer.from_pretrained(d), cfg, head)
         src, rev = (cfg.path, None) if os.path.isdir(cfg.path) else (cfg.repo_id, cfg.revision)
         tok = AutoTokenizer.from_pretrained(src, revision=rev)
@@ -120,6 +122,8 @@ class Backbone(nn.Module):
             gemlite_quantize_(lm.layers, 4 if cfg.weight_quant == "w4" else 8)
         if cfg.weight_quant == "a8w8":             # int8 weights and int8 dynamic activations (GemLite)
             gemlite_a8w8_(lm.layers)
+        if cfg.weight_quant == "a8w8sq":           # the same after SmoothQuant scaling (outliers moved into weights)
+            smooth_a8w8_(lm.layers, torch.load(cfg.smooth_path, weights_only=False)["scales"])
         if cfg.weight_quant == "awq4":             # calibrated 4-bit (scripts/awq_calibrate.py -> cfg.awq_path)
             from .awq import apply_awq_
             apply_awq_(lm.layers, torch.load(cfg.awq_path, weights_only=False)["params"])

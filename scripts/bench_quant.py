@@ -3,7 +3,8 @@
     .venv/bin/python scripts/bench_quant.py --ckpt runs/x2b/model.pt [--configs int8:int8 nf4:int4] [--cases 100]
 
 Each config is "weights:cache[:graphs]": weights int8 | nf4 (bitsandbytes) | w8 | w4 (GemLite Triton GEMMs, round to
-nearest) | awq (pre-quantized AWQ checkpoint on GemLite int4 kernels, configs/*_awq.yaml), cache
+nearest) | awq (pre-quantized AWQ checkpoint on GemLite int4 kernels, configs/*_awq.yaml) | a8w8 (GemLite int8
+weights + per-token int8 activations) | a8w8sq (a8w8 after SmoothQuant scaling, --smooth-path), cache
 int8 | int4, ":graphs" = CUDA-graph engine (src/opendecider/deploy.py), ":qcache" = question-cache row path
 (exact; question tokens computed once per question instead of once per option), ":serving" = the serving path
 load_decider installs (decider.prepare_inference_: question cache + tuned int8 kernels), ":q4t" = embedding table
@@ -78,6 +79,7 @@ def main():
     ap.add_argument("--cases", type=int, default=100)
     ap.add_argument("--no-acc", action="store_true", help="memory and latency only (run one config per process)")
     ap.add_argument("--out", default="runs/quant/bench.json")
+    ap.add_argument("--smooth-path", default="", help="weights a8w8sq: SmoothQuant scales (scripts/smoothquant_calibrate.py)")
     a = ap.parse_args()
     os.environ["OPENDECIDER_STATE_CACHE_MB"] = "0"
     ck = torch.load(a.ckpt, map_location="cpu", weights_only=False)
@@ -91,6 +93,8 @@ def main():
             over = {"weight_quant": w, "kv_quant": kv}
             if "q4t" in mode:               # embedding table and LM head as Q4_0 blocks instead of int8
                 over["table_quant"] = "q4"
+            if w == "a8w8sq":
+                over["smooth_path"] = a.smooth_path
             pf = [int(m_[2:]) for m_ in mode if m_.startswith("pf")]
             if pf:                          # state pass in slices of this many tokens
                 over["prefill_chunk"] = pf[0]
