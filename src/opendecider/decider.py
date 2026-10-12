@@ -78,8 +78,9 @@ def mix_answers(branch_answers: list[dict], weights: list[float], givens: list[d
 
 
 # VeRA updates smaller than this fraction of the frozen weight (Frobenius norm) are below bf16 resolution (8-bit
-# significand: relative spacing 2^-8; half of it is lost to rounding) and are left out at serving
-VERA_INERT = 2 ** -9
+# significand: relative spacing 2^-8) and are left out at serving. The 9B's is 0.0019 (on activations 0.04-0.14%,
+# RESULTS 20.2); dropping it gives typed decisions 0.560 vs 0.552 and the same Banking77 / injection accuracy
+VERA_INERT = 2 ** -8
 
 # option rows per call from which the question cache is faster (scripts/bench_qcache_rows.py, Orin, 50 W, ~0.9k-token
 # state): about 64 on the 2B, about 12 on the 9B, where every repeated token costs ~4x more
