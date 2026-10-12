@@ -1481,6 +1481,35 @@ them, `=0` always drops). The 9B's measure 0.0019. Serving path with them droppe
 0.552), Banking77 0.875, injections 0.810 (same); latency 2.57 / 7.04 / 20.6 s (with them 2.65 / 6.91 / 20.1): no
 speed change, the adapters' matmuls are small next to the backbone's.
 
+## 21. Upper layers' state cache from an earlier layer, no backprop (2026-10-12)
+
+Prefill dominates long states (20.3), and option rows read the state only through each layer's cache (K/V in the
+full-attention layers, conv and recurrent state in the gated DeltaNet layers). SwiftKV (SingleInputKV, arXiv
+2410.03960) builds the upper layers' prompt cache from one earlier layer's output; DeepSeek-V4.1-Flash's causal
+encoder-decoder (arXiv 2609.19969) trains the same split in from the start, each decoder layer projecting its global
+KV from layer L/2. `scripts/skipkv_probe.py` retrofits it to the frozen 9B: state tokens run layers 1..c, every layer
+above c builds its state cache from a predicted input, rows run every layer as before. Predicted input: the cut layer's
+output itself (SwiftKV without its distillation), or one ridge map per upper layer from the cut layer's output, fitted
+in closed form on 200 synthetic training states (43k tokens; strength picked on held-out validation states).
+Measured on typed decisions (100 cases, 500 questions), Banking77 8-way and prompt injections; the exact path for
+reference. The script measures accuracy; the saving is computed from the skipped work (state tokens above the cut
+still need their K/V, or k/v/a/b projections, conv and recurrence; they skip q, z, output projections and the MLP).
+
+| State pass | Skipped state compute | Typed decisions | Same top answer as exact | Banking77 | Injections |
+|---|---|---|---|---|---|
+| exact | – | 0.558 | – | 0.875 | 0.802 |
+| cut 24, cut layer's output | 23% | 0.550 | 93.8% (TV 0.036) | 0.875 (100%) | 0.802 (100%) |
+| cut 24, ridge maps | 23% | 0.582 | 95.2% (TV 0.031) | 0.875 (100%) | 0.802 (100%) |
+| cut 20, cut layer's output | 34% | 0.572 | 94.4% (TV 0.037) | 0.875 (100%) | 0.802 (100%) |
+| cut 20, ridge maps | 34% | 0.572 | 93.6% (TV 0.034) | 0.875 (100%) | 0.802 (100%) |
+
+- No accuracy lost at a third of the state pass skipped, with no training at all: the public sets do not change one
+  answer, typed decisions stay within noise (the 0.582 is not a gain one should count on: 95% same answers).
+- The ridge maps predict the upper layers' inputs with about half the error of the cut layer's output (held-out
+  relative error at layer 31: 0.38 vs 0.86 from cut 20), but that does not show downstream at these cuts.
+- Cuts 16 and 12 (45% and 56% skipped) were not reached in the time slot: next. A real implementation would fold
+  each ridge map into that layer's k/v (or k/v/a/b) projections and skip the rest of the layer for state tokens.
+
 ## Sources for numbers not measured here
 
 Retrieved 2026-09-23. All are reported by their authors or by third parties and were not reproduced.
