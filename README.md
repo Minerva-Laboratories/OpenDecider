@@ -232,13 +232,18 @@ One fresh process per configuration, eager kernels. Accuracy on 500 typed-decisi
 | 9B, int8 / int8 (default; Q4_0 GGUF download, int8 on the GPU) | 8.62 GB | 9.9 / 10.0 / 11.1 GB | 3.68 / 7.52 / 21.4 s | 0.560 / 0.875 / 0.810 |
 | 9B, int8 / int4 | 8.62 GB | 9.9 / 10.0 / 11.1 GB | 3.70 / 7.55 / 21.4 s | 0.546 / 0.881 / 0.793 |
 | 9B AWQ (`opendecider-9b-awq`), int4 / int4 | 5.74 GB | 6.9 / 7.0 / 8.2 GB | 2.93 / 7.20 / 26.4 s | 0.526 / 0.887 / 0.819 |
-| 9B, SmoothQuant int8 weights + int8 activations (`a8w8sq`, opt-in), serving path | 8.63 GB | 9.6 / 9.7 / 11.1 GB | 2.12 / 4.83 / 17.0 s | 0.558 / 0.881 / 0.784 |
+| 9B, SmoothQuant int8 weights + int8 activations (`a8w8sq`, opt-in), serving path | 8.63 GB | 9.4 / 9.5 / 11.0 GB | 1.67 / 4.28 / 16.2 s | 0.558 / 0.881 / 0.784 |
 | 9B on llama.cpp (Q4_0 file, `--llamacpp-gguf`), serving path | 5.2 GB file | – | 2.65 / 8.80 / 33.3 s | 0.574 / 0.869 / 0.819 |
+| 9B, int8, state pass skipped above layer 16 (`OPENDECIDER_SKIPKV`, opt-in), serving path | 9.1 GB | 10.0 / 10.1 / 11.4 GB | 1.87 / 4.51 / 13.0 s | 0.574 / 0.875 / 0.810 |
 
 - The heads were trained on int8 backbone features; untrained 4-bit variants cost a few points on some sets.
-- The last two rows are the serving path (question cache, tuned kernels; the int8 row there: 2.65 / 6.91 / 20.1 s).
-  llama.cpp matches PyTorch's accuracy with no PyTorch backbone, and is slower on long states (its prefill on the Orin
-  is ~470 tokens/s against ~770); see `docs/RESULTS.md` §20.
+- The last three rows are the serving path (question cache, tuned kernels; the int8 row there: 2.49 / 6.79 / 20.1 s,
+  bench_quant 2.65 / 6.91 / 20.1 s). llama.cpp matches PyTorch's accuracy with no PyTorch backbone, and is slower on
+  long states (its prefill on the Orin is ~470 tokens/s against ~770); see `docs/RESULTS.md` §20.
+- Skipped state pass (SwiftKV-style, no training; `docs/RESULTS.md` §21): state tokens run layers 1-16, the layers
+  above write only their cache from closed-form ridge maps (`scripts/skipkv_serve.py` fits them). The state pass is
+  1.6x faster; the public sets give the same answers, typed decisions 94% the same. For decisions only: on free text
+  generation (Mercurius-1-4B) the same retrofit changes outputs (§21.2).
 - A 9B in 4 bits works when the head is fitted to it: `opendecider-9b-awq` is the 2B head stitched onto the AWQ
   weights (no 9B training). It matches the int8 stitched model on the public benchmarks (`docs/RESULTS.md` §13.6),
   is 1 to 2 points below the trained 9B on knowledge-heavy multiple choice, and weaker at flagging questions about
@@ -508,6 +513,7 @@ Environment variables:
 | `OPENDECIDER_STATE_CACHE_MB` | `2048` | Prefix cache size. `0` turns it off. |
 | `OPENDECIDER_NONE_TEXT` | `none of the above` | Text of the `none` option. Empty turns it off. |
 | `OPENDECIDER_LLAMACPP_GGUF` | – | Run the backbone in llama.cpp from this GGUF (the 9B; build `deploy/llamacpp/build.sh` first). Same as `serve --llamacpp-gguf`. |
+| `OPENDECIDER_SKIPKV` | – | Maps file (`scripts/skipkv_serve.py`): state passes skip the layers above its cut (cache only). Opt-in. |
 | `OPENDECIDER_VERA` | `auto` | VeRA adapters below bf16 resolution are left out at serving; `1` keeps them, `0` always drops them. |
 | `HOST`, `PORT` | `127.0.0.1`, `8000` | Bind address. |
 

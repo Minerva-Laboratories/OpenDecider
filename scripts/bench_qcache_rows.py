@@ -29,10 +29,24 @@ def main():
     ap.add_argument("--events", type=int, default=25)
     ap.add_argument("--repeats", type=int, default=3)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--weight-quant", default=None, help="override the checkpoint's backbone weight_quant (e.g. a8w8sq)")
+    ap.add_argument("--smooth-path", default="", help="weight_quant a8w8sq: SmoothQuant scales")
     a = ap.parse_args()
     res = []
     with gpu_lock("bench_qcache_rows"):
-        dec = load_decider(a.ckpt)
+        if a.weight_quant:                  # load_decider on another weight format (bench_quant's override)
+            from opendecider.backbone import Backbone, BackboneConfig
+            from opendecider.checkpoint import load_model
+            from opendecider.decider import Decider, prepare_inference_
+            ck = torch.load(a.ckpt, map_location="cpu", weights_only=False)
+            bb = Backbone.load(BackboneConfig(**{**ck["backbone_cfg"], "weight_quant": a.weight_quant,
+                                                 "smooth_path": a.smooth_path}))
+            del ck
+            model, extra = load_model(a.ckpt, backbone=bb)
+            prepare_inference_(model)
+            dec = Decider(model, extra.get("temperature", 1.0), extra.get("temperature_by_type"))
+        else:
+            dec = load_decider(a.ckpt)
         cfg = dec.model.cfg
         st = state(a.events, a.events)
         for n, k in SHAPES:

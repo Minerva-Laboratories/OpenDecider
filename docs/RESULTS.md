@@ -1415,13 +1415,23 @@ Nothing is retrained. `scripts/bench_quant.py`, Jetson AGX Orin, one fresh proce
 | a8w8, eager | 1.65 / 4.04 / 15.0 s | 11.1 GB | 0.530 | 0.881 | 0.793 |
 | a8w8 + SmoothQuant, eager | 1.74 / 4.33 / 16.2 s | 11.1 GB | 0.560 | 0.881 | 0.776 |
 | int8 weights, serving path | 2.65 / 6.91 / 20.1 s | 11.1 GB | 0.552 | 0.875 | 0.810 |
-| a8w8 + SmoothQuant, serving path | 2.12 / 4.83 / 17.0 s | 11.1 GB | 0.558 | 0.881 | 0.784 |
+| a8w8 + SmoothQuant, serving path (first run) | 2.12 / 4.83 / 17.0 s | 11.1 GB | 0.558 | 0.881 | 0.784 |
+| a8w8 + SmoothQuant, serving path (fixed, 2026-10-13) | 1.67 / 4.28 / 16.2 s | 11.0 GB | – | – | – |
 
 - Without smoothing, int8 activations cost 2.8 points on typed decisions; SmoothQuant recovers them. Injection
   detection is 2.6 points lower (3 of 116 texts), inside that set's noise but in the same direction on both paths.
 - Speed: on the eager path 2.3x faster on short states, 1.4x at 15k tokens. Through the serving path (question cache
-  + tuned int8 kernels, what `load_decider` serves) the gain is 1.25x / 1.43x / 1.18x, and a8w8sq is slower there than
-  on the eager path (2.12 vs 1.74 s at 0.8k tokens): the serving path's tuning does not account for a8w8sq yet. To do.
+  + tuned int8 kernels, what `load_decider` serves) the first measurement gave only 1.25x / 1.43x / 1.18x, slower
+  than eager; fixed 2026-10-13, see below.
+- Serving path, fixed (2026-10-13). Two causes. (1) That bench ran int8 first in the same process: its tuned-kernel
+  load turns GemLite autotuning off process-wide, so the a8w8 kernels ran untuned (one process per configuration
+  now: eager 1.80 / 4.46 / 16.1 s, serving 1.93 / 4.51 / 16.3 s). (2) The question cache threshold (12 option rows on
+  the 9B) was measured with int8 weights; with int8 activations the repeated question tokens are cheaper.
+  `scripts/bench_qcache_rows.py --weight-quant a8w8sq`: without the cache 1.56 s at 4 rows rising ~0.04 s per row,
+  with it ~2.05 s flat up to ~40 rows; crossover about 21 rows (18 rows: 1.93 vs 2.05 s; 34 rows: 2.57 vs 2.04 s;
+  222 rows: 11.8 vs 3.8 s). `QCACHE_MIN_ROWS` now 20 for a8w8 / a8w8sq on the 9B. Serving path after the fix:
+  **1.67 / 4.28 / 16.2 s** (bench's 3 questions, 11 rows: no question cache), 1.59x / 1.62x / 1.25x faster than int8
+  serving, and no longer slower than eager.
 - Opt-in for now (`weight_quant: a8w8sq` + `smooth_path`); the default stays int8 weights.
 
 ### 20.2 llama.cpp as the backbone: feasibility probe
@@ -1521,8 +1531,63 @@ still need their K/V, or k/v/a/b projections, conv and recurrence; they skip q, 
   changes (one injection answer). Cut 12 (56%) is past the edge: answers drift (82% same typed answers, injections
   0.733 without maps); the ridge maps recover most of it (0.793, 96% same) but not all. Cut 16 with ridge maps is
   the safe setting found here.
-- A real implementation would fold each ridge map into that layer's k/v (or k/v/a/b) projections and skip the rest
-  of the layer for state tokens; not built.
+- The real skipped pass is built (21.1); folding each map into its layer's projections would save about 6% of what
+  remains and is not done.
+
+### 21.1 The skipped state pass for real (cut 16, 9B)
+
+`src/opendecider/skipkv.py`: during state passes, every layer from the cut up is replaced by a cache-only layer that
+writes its cache from the predicted input and runs nothing else for state tokens: k_proj, v_proj, k_norm and RoPE in
+the full-attention layers (no queries, attention or output projection), in_proj_qkv / a / b, conv and the delta-rule
+state in the DeltaNet layers (no z, gated norm or output projection), no MLP. Rows run every layer as before. Unit
+tests: with the exact input predicted, the cache equals the full layers' (whole pass and continuation chunks, both
+layer types). Serving opt-in: `OPENDECIDER_SKIPKV=<maps file>` (fit with `scripts/skipkv_serve.py`).
+
+Two maps, both closed-form ridge from the cut's input on 200 synthetic calibration states (43k tokens), strength by
+held-out error (λ = 0.01 relative): **input** (the probe's: predict layer j's input, then its own input norm) and
+**normed** (RMS-normalized cut input straight to layer j's normed input; linear up to the projections, so it could be
+folded into them). `scripts/skipkv_serve.py`, serving path (load_decider), Jetson AGX Orin 50 W:
+
+| 9B | State pass, 0.8k / 3.7k / 15k tokens | decide() (3 questions) | Typed: accuracy, same answer (TV) | Banking77 | Injections | Peak memory (15k) |
+|---|---|---|---|---|---|---|
+| exact | 1.48 / 5.74 / 18.9 s | 2.49 / 6.79 / 20.1 s | 0.560 | 0.875 | 0.810 | 11.0 GB |
+| cut 16, normed maps | 0.90 / 3.45 / 11.8 s | 1.87 / 4.51 / 13.0 s | 0.574, 94.2% (0.037) | 0.875 (100%) | 0.810 (100%) | 11.4 GB |
+| cut 16, input maps | 0.90 / 3.47 / 11.9 s | 1.89 / 4.53 / 13.1 s | 0.566, 93.4% (0.037) | 0.875 (100%) | 0.810 (100%) | 11.4 GB |
+
+- The state pass is 1.6x faster at every length (40% of its weight work skipped, plus the upper attention layers'
+  attention itself); decide() 1.33x at 0.8k tokens and 1.54x at 15k, where the state pass dominates.
+- Same answers as the probe measured: the public sets do not change one answer, typed decisions 94% the same with
+  accuracy within noise. The maps cost 0.5 GB (16 x 4096^2 bf16).
+- Normed maps are the default (equal speed, slightly closer to exact, foldable).
+
+### 21.2 The same skip for ordinary text generation (Mercurius-1-4B)
+
+Does the retrofit help a plain LLM workload? As in SwiftKV, prompt tokens run layers 0..cut-1 and the layers above
+write only their cache; the last prompt token and every generated token run all layers, so only time to first token
+changes. Mercurius's own mixers got cache-only paths too (MLA: only its TurboQuant latent / RoPE-key codes; GDN-2: up
+to the state update, no z / gated norm / output projection); `scripts/skipkv_check_exact.py` checks every path with
+the exact input predicted: the cache is bit-identical (Mercurius MLA + GDN-2 and the 9B's stock layers). Maps (normed)
+fitted on 200 FineWeb-Edu documents (first 256 tokens each, 48k tokens; ODC-BY local sample), evaluated on 60 other
+documents: a 1,024-token prompt, the next 128 tokens scored by teacher forcing, and a 32-token greedy continuation.
+`scripts/skipkv_lm.py`, Jetson AGX Orin 50 W:
+
+| Mercurius-1-4B (32 layers) | Prompt pass, 1k / 4k tokens | Continuation NLL (Δ, 95% CI) | KL(exact ‖ skipped) | Same top-1 token | Greedy 32 tokens identical (first difference, mean) |
+|---|---|---|---|---|---|
+| exact | 0.97 / 3.59 s | 2.364 | – | – | – |
+| cut 24 | 0.84 / 3.04 s (1.15x / 1.18x) | +0.005 (+0.002, +0.008) | 0.009 | 96.4% | 28% (token 17) |
+| cut 16 | 0.70 / 2.50 s (1.38x / 1.43x) | +0.085 (+0.068, +0.103) | 0.091 | 89.3% | 0% (token 4) |
+
+(Quality from the run with whole mixers above the cut; the cache-only paths write the same cache, timing from a
+second run with them. Whole mixers above the cut: 0.91 / 3.27 s at cut 24, 0.81 / 2.96 s at cut 16.)
+
+- It does not carry over. Decisions read the state through a softmax over a few options and tolerate the drift (9B:
+  public sets unchanged); free generation compounds it: at cut 24, where the next-token loss rises only 0.2%,
+  greedy outputs already differ from the exact model's within 32 tokens in 72% of documents. Cut 16 is clearly worse.
+- The gain is also smaller: only the prompt pass changes, Mercurius's upper layers are cheaper relative to its MLP
+  than the 9B's, and decoding is unchanged.
+- SwiftKV itself trains the upper layers' k/v projections by distillation from the unchanged model for this reason;
+  the closed-form retrofit alone is not enough for generation. Not enabled for generation; would need that
+  self-distillation step (a fine-tune, not done).
 
 ## Sources for numbers not measured here
 

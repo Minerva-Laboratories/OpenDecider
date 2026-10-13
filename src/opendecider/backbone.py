@@ -79,6 +79,11 @@ class Backbone(nn.Module):
         self.supports_shared_prefix = True
         # which shared-prefix attention the rows use: prefix_attn (Qwen3.5 attention) or the absorbed MLA one
         self.shared_prefix_kind = "mercurius" if cfg.weight_quant == "mercurius" else "qwen"
+        # state passes skip the work above a cut layer (skipkv.SkipMaps; RESULTS 21): opt-in, OPENDECIDER_SKIPKV=<maps>
+        self.skip_state = None
+        if os.environ.get("OPENDECIDER_SKIPKV"):
+            from .skipkv import SkipMaps
+            self.skip_state = SkipMaps.load(os.environ["OPENDECIDER_SKIPKV"], cfg.device)
 
     # ------------------------------------------------------------------ construction
     @classmethod
@@ -306,6 +311,13 @@ class Backbone(nn.Module):
         pass (exact up to float error), but activation memory is bounded by the chunk, not by T.
         Returns (hidden features over all T, or None if not keep_hidden; cache)."""
         C = self.cfg.prefill_chunk or ids.shape[1]
+        if getattr(self, "skip_state", None) is not None and not keep_hidden and not torch.is_grad_enabled():
+            from .skipkv import skipping            # upper layers write only their cache (the features are not used)
+            with skipping(self.lm, self.skip_state):
+                return self._prefill(ids, mask, layers, cache, keep_hidden, C)
+        return self._prefill(ids, mask, layers, cache, keep_hidden, C)
+
+    def _prefill(self, ids, mask, layers, cache, keep_hidden, C):
         feats = []
         past = cache.get_seq_length() if cache is not None else 0
         pmask = torch.ones(ids.shape[0], past, dtype=torch.bool, device=mask.device) if past else None

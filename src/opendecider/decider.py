@@ -83,8 +83,9 @@ def mix_answers(branch_answers: list[dict], weights: list[float], givens: list[d
 VERA_INERT = 2 ** -8
 
 # option rows per call from which the question cache is faster (scripts/bench_qcache_rows.py, Orin, 50 W, ~0.9k-token
-# state): about 64 on the 2B, about 12 on the 9B, where every repeated token costs ~4x more
-QCACHE_MIN_ROWS = {2048: 64, 4096: 12}
+# state): about 64 on the 2B, about 12 on the 9B, where every repeated token costs ~4x more; with int8 activations
+# (a8w8 / a8w8sq) repeated tokens are cheaper and the 9B's crossover moves to about 20 (RESULTS 20.1)
+QCACHE_MIN_ROWS = {2048: 64, 4096: 12, (4096, "a8w8"): 20, (4096, "a8w8sq"): 20}
 
 
 def prepare_inference_(model) -> None:
@@ -110,7 +111,8 @@ def prepare_inference_(model) -> None:
     if os.environ.get("OPENDECIDER_QCACHE", "1") != "0" and getattr(cfg, "v3_features", None) == "branched" \
             and getattr(cfg, "v3_row_format", None) == "answer":
         cfg.v3_question_cache = True
-        default = QCACHE_MIN_ROWS.get(model.backbone.hidden_size, 32)
+        h, wq = model.backbone.hidden_size, getattr(model.backbone.cfg, "weight_quant", None)
+        default = QCACHE_MIN_ROWS.get((h, wq), QCACHE_MIN_ROWS.get(h, 32))
         cfg.v3_qcache_min_rows = int(os.environ.get("OPENDECIDER_QCACHE_MIN_ROWS", default))
     fast_int8_kernels_(model.backbone)
 
