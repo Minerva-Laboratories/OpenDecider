@@ -1502,13 +1502,21 @@ still need their K/V, or k/v/a/b projections, conv and recurrence; they skip q, 
 | cut 24, ridge maps | 23% | 0.582 | 95.2% (TV 0.031) | 0.875 (100%) | 0.802 (100%) |
 | cut 20, cut layer's output | 34% | 0.572 | 94.4% (TV 0.037) | 0.875 (100%) | 0.802 (100%) |
 | cut 20, ridge maps | 34% | 0.572 | 93.6% (TV 0.034) | 0.875 (100%) | 0.802 (100%) |
+| cut 16, cut layer's output | 45% | 0.558 | 93.2% (TV 0.048) | 0.875 (100%) | 0.810 (99.1%) |
+| cut 16, ridge maps | 45% | 0.572 | 94.0% (TV 0.038) | 0.875 (100%) | 0.802 (100%) |
+| cut 12, cut layer's output | 56% | 0.534 | 82.2% (TV 0.132) | 0.881 (98.1%) | 0.733 (89.7%) |
+| cut 12, ridge maps | 56% | 0.564 | 86.6% (TV 0.091) | 0.887 (97.5%) | 0.793 (95.7%) |
 
-- No accuracy lost at a third of the state pass skipped, with no training at all: the public sets do not change one
+- No accuracy lost at a third (cut 20) to 45% (cut 16, ridge maps) of the state pass skipped, with no training at all: the public sets do not change one
   answer, typed decisions stay within noise (the 0.582 is not a gain one should count on: 95% same answers).
 - The ridge maps predict the upper layers' inputs with about half the error of the cut layer's output (held-out
   relative error at layer 31: 0.38 vs 0.86 from cut 20), but that does not show downstream at these cuts.
-- Cuts 16 and 12 (45% and 56% skipped) were not reached in the time slot: next. A real implementation would fold
-  each ridge map into that layer's k/v (or k/v/a/b) projections and skip the rest of the layer for state tokens.
+- Cut 16 (45% skipped) still loses nothing with the ridge maps; the cut layer's output alone already shows small
+  changes (one injection answer). Cut 12 (56%) is past the edge: answers drift (82% same typed answers, injections
+  0.733 without maps); the ridge maps recover most of it (0.793, 96% same) but not all. Cut 16 with ridge maps is
+  the safe setting found here.
+- A real implementation would fold each ridge map into that layer's k/v (or k/v/a/b) projections and skip the rest
+  of the layer for state tokens; not built.
 
 ## Sources for numbers not measured here
 
