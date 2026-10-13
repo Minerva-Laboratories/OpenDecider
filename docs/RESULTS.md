@@ -1390,8 +1390,14 @@ confident (median 0.75, 90th percentile 0.93, against 0.97 for correct lookups);
 and those are low-confidence (median 0.57) so the mixture already discounts them. Certified automation at a 5% bound
 (23%, 19.1) is limited by those confident hop-2 errors; at 10% (82%) it is close to the ceiling (~99% with 11%
 errors).
-Recalibrations that keep the ranking cannot separate them; a second look at hop 2 (another option order, a yes/no check
-of the chosen department) is the next thing to try.
+Recalibrations that keep the ranking cannot separate them, and neither can a second look with the same model
+(`eval/hop2_second_look.py`: for the top manager m and department d, one request asks hop 2 again with the options
+shuffled, a paraphrase, and "Does m work in the d department?"). For the 25 hop-1 errors the look is about the wrong
+manager and agrees every time; for 39 right-manager errors it repeats the same wrong department in 69%: a held
+belief, not noise in one reading. Shuffled and paraphrase agree with each other on 98% of items, and disagreement
+also hits 4% of correct items. AUROC for correctness: agreement 0.58, the yes/no check 0.59, the mixed answer's own
+probability 0.81. Used as a confidence signal (fitted on 200 labels, or as an agreement filter with no fitting), the
+looks certify less at a 5% bound than per-step temperatures, not more.
 
 ## 20. Deployment speed: SmoothQuant a8w8, llama.cpp, VeRA (2026-10-12)
 
