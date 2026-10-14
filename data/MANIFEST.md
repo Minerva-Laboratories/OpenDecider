@@ -23,6 +23,8 @@ License as listed on the Hugging Face dataset card (or source repo where marked)
 | allenai/OpenBookQA | Apache-2.0 (GitHub repo) | benchmark (held out) | HF card says "unknown" |
 | tau/commonsense_qa [94630fe30d] | MIT | benchmark (held out) | |
 | deepset/prompt-injections [4f61ecb038] | Apache-2.0 | benchmark (held out) | |
+| openai/gsm8k (main, test) | MIT | evaluation only (scripts/skipkv_tasks.py: LLM generation with a skipped prompt pass) | not redistributed; revision recorded with the run |
+| HuggingFaceFW/fineweb-edu (sample-10BT, first shard) | ODC-BY | evaluation / closed-form map fitting (scripts/skipkv_lm.py) | local copy from the Mercurius project; not redistributed |
 | clinc/clinc_oos [155b9c7104] | CC-BY-3.0 | training candidate | |
 | AmazonScience/massive | CC-BY-4.0 | training candidate | |
 | google/boolq [35b264d036] | CC-BY-SA-3.0 | training candidate | share-alike |

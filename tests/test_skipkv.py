@@ -66,3 +66,45 @@ def test_generic_mixer_path_matches():
         bb.skip_state = None
     for k, t in exact.tensors.items():
         assert torch.allclose(t, skip.tensors[k], atol=1e-5), k
+
+
+def test_ema_scan_matches_loop():
+    from opendecider.skipkv import ema_scan
+    x = torch.randn(2, 300, 4)
+    y, c = ema_scan(x, 0.9, block=64)
+    ref, prev = torch.zeros_like(x), torch.zeros(2, 4)
+    for t in range(300):
+        prev = 0.9 * prev + 0.1 * x[:, t]
+        ref[:, t] = prev
+    assert torch.allclose(y, ref, atol=1e-5) and torch.allclose(c, ref[:, -1], atol=1e-5)
+    y2, _ = ema_scan(x[:, 100:], 0.9, ref[:, 99], block=64)          # carry continues a split sequence
+    assert torch.allclose(y2, ref[:, 100:], atol=1e-5)
+
+
+@pytest.mark.parametrize("chunk", [0, 7])
+def test_tail_and_context_features_keep_exactness(chunk):
+    """Passthrough model, identity on the cut's input and zero weight on its EMAs, last 5 tokens through every layer:
+    still the exact cache (left padding, continuation chunks)."""
+    bb = tiny_backbone(kv_quant="none")
+    _passthrough_above(bb, 3)
+    bb.cfg.prefill_chunk = chunk
+    seqs = bb.tokenize(state_texts(["a longer state " * 10 + "x", "short state"]))
+    exact, _ = bb.prefix_cache_batch(seqs, quantize=False)
+    D, U = bb.hidden_size, len(bb.lm.layers) - 3
+    W = torch.cat([torch.eye(D), torch.zeros(2 * D, D)]).repeat(U, 1, 1)
+    bb.skip_state = SkipMaps(3, "input", W, torch.zeros(U, D), alphas=(0.5, 0.9), tail=5)
+    try:
+        skip, _ = bb.prefix_cache_batch(seqs, quantize=False)
+    finally:
+        bb.skip_state = None
+    for k, t in exact.tensors.items():
+        assert torch.allclose(t, skip.tensors[k], atol=1e-5), k
+
+
+def test_fit_with_context_features():
+    bb = tiny_backbone(kv_quant="none")
+    _passthrough_above(bb, 4)
+    texts = state_texts([f"state number {i} " * 6 for i in range(12)])
+    maps = fit_skip_maps(bb, texts[:10], texts[10:], 4, "normed", lams=(1e-6,), log=lambda *_: None, alphas=(0.9,))
+    assert maps.W.shape == (4, 2 * bb.hidden_size, bb.hidden_size) and maps.alphas == (0.9,)
+    assert max(maps.meta["held_rel_err"].values()) < 0.05, maps.meta

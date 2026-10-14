@@ -32,28 +32,73 @@ def _rms(h: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
     return h * torch.rsqrt(h.pow(2).mean(-1, keepdim=True) + eps)
 
 
-class SkipMaps:
-    """One ridge map per layer j >= cut: W (U, D, D), b (U, D) in bf16. A plain object, not a module: attaching it
-    to the backbone adds nothing to its state dict."""
+def ema_scan(x: torch.Tensor, a: float, carry: torch.Tensor | None = None, block: int = 128):
+    """Causal exponential moving average along dim 1: y_t = a y_{t-1} + (1 - a) x_t, y_{-1} = carry (zeros if None).
+    x (B, T, D) float32. Blocked closed form (one (block x block) decay matrix per block, carry between blocks).
+    Returns (y, last row as the next carry)."""
+    B, T, D = x.shape
+    y_prev = torch.zeros(B, D, dtype=x.dtype, device=x.device) if carry is None else carry
+    i = torch.arange(block, device=x.device)
+    P = (a ** (i[:, None] - i[None, :]).clamp(min=0).to(x.dtype)) * (i[:, None] >= i[None, :])
+    pw = a ** (i + 1).to(x.dtype)
+    out = []
+    for s in range(0, T, block):
+        xb = x[:, s: s + block]
+        n = xb.shape[1]
+        yb = (1 - a) * torch.einsum("ij,bjd->bid", P[:n, :n], xb) + pw[:n, None] * y_prev[:, None, :]
+        y_prev = yb[:, -1]
+        out.append(yb)
+    return torch.cat(out, 1), y_prev
 
-    def __init__(self, cut: int, mode: str, W: torch.Tensor, b: torch.Tensor, lam: float = 0.0):
+
+def context_features(h: torch.Tensor, mode: str, alphas=(), mask: torch.Tensor | None = None, carry=None):
+    """Map inputs from the cut's input h (B, T, D): [x, EMA_a(x) for a in alphas], x = n(h) (normed) or h. The EMAs
+    are a cheap linear stand-in for the context mixing the skipped layers would do (DeltaNet layers are decay-weighted
+    sums themselves). mask (B, T): padding contributes zeros. Returns ((B, T, (1 + len(alphas)) D) float32, carries)."""
+    x = _rms(h) if mode == "normed" else h.float()
+    feats, new = [x], []
+    if alphas:
+        xm = x if mask is None else x * mask[..., None].to(x.dtype)
+        for k, a in enumerate(alphas):
+            e, c = ema_scan(xm, a, None if carry is None else carry[k])
+            feats.append(e)
+            new.append(c)
+    return torch.cat(feats, -1), new
+
+
+class SkipMaps:
+    """One ridge map per layer j >= cut: W (U, F D, D), b (U, D) in bf16 (F = 1 + len(alphas): the cut's input and its
+    causal EMAs). tail: the last `tail` tokens of every state pass run all layers (on top of the skipped cache). A plain
+    object, not a module: attaching it to the backbone adds nothing to its state dict."""
+
+    def __init__(self, cut: int, mode: str, W: torch.Tensor, b: torch.Tensor, lam: float = 0.0, alphas=(),
+                 tail: int = 0):
         assert mode in ("input", "normed")
         self.cut, self.mode, self.lam, self.W, self.b = cut, mode, lam, W, b
+        self.alphas, self.tail = tuple(alphas), tail
         self.meta: dict = {}
+        self.reset()
+
+    def reset(self):
+        """Start of a state pass: no EMA carry, no cached features (skipping() calls it)."""
+        self._carry, self._fh, self._feat, self._mask = None, None, None, None
 
     def predict(self, j: int, h: torch.Tensor) -> torch.Tensor:
-        x = _rms(h).to(h.dtype) if self.mode == "normed" else h
+        if self._fh is not h:                         # once per chunk: every upper layer receives the same tensor
+            f, self._carry = context_features(h, self.mode, self.alphas, self._mask, self._carry or None)
+            self._fh, self._feat = h, f.to(h.dtype).reshape(-1, f.shape[-1])
         i = j - self.cut
-        return torch.addmm(self.b[i].to(x.dtype), x.reshape(-1, x.shape[-1]), self.W[i].to(x.dtype)).view(x.shape)
+        return torch.addmm(self.b[i].to(h.dtype), self._feat, self.W[i].to(h.dtype)).view(h.shape)
 
     def save(self, path: str, meta: dict | None = None):
         torch.save({"cut": self.cut, "mode": self.mode, "lam": self.lam, "W": self.W.cpu(), "b": self.b.cpu(),
-                    "meta": meta or self.meta}, path)
+                    "alphas": list(self.alphas), "meta": meta or self.meta}, path)
 
     @classmethod
-    def load(cls, path: str, device="cuda") -> "SkipMaps":
+    def load(cls, path: str, device="cuda", tail: int = 0) -> "SkipMaps":
         d = torch.load(path, map_location="cpu", weights_only=False)
-        m = cls(d["cut"], d["mode"], d["W"].to(device), d["b"].to(device), d.get("lam", 0.0))
+        m = cls(d["cut"], d["mode"], d["W"].to(device), d["b"].to(device), d.get("lam", 0.0), d.get("alphas", ()),
+                tail)
         m.meta = d.get("meta", {})
         return m
 
@@ -187,6 +232,7 @@ class CacheOnlyLayer(nn.Module):
 def skipping(lm: nn.Module, maps: SkipMaps):
     """Layers >= maps.cut replaced by CacheOnlyLayer for the duration (state passes only)."""
     saved = {}
+    maps.reset()
     try:
         for j in range(maps.cut, len(lm.layers)):
             saved[j] = lm.layers[j]
@@ -214,14 +260,13 @@ def _capture(lm, cut: int):
 
 
 @torch.no_grad()
-def _pairs(bb, text: str, cut: int, mode: str):
-    """(X (T, D+1) float32 with a ones column, {j: target (T, D) float32}) for one state."""
+def _pairs(bb, text: str, cut: int, mode: str, alphas=()):
+    """(X (T, F D + 1) float32 with a ones column, {j: target (T, D) float32}) for one state."""
     lm = bb.lm
     ids = bb.tokenize([text])
     with _capture(lm, cut) as st:
         bb.prefix_cache_batch(ids)
-    h = st[cut].float()
-    X = _rms(h) if mode == "normed" else h
+    X = context_features(st[cut][None], mode, alphas)[0][0]
     X = torch.cat([X, torch.ones(len(X), 1, device=X.device)], 1)
     Y = {j: (lm.layers[j].input_layernorm(st[j]).float() if mode == "normed" else st[j].float())
          for j in range(cut, len(lm.layers))}
@@ -229,24 +274,25 @@ def _pairs(bb, text: str, cut: int, mode: str):
 
 
 @torch.no_grad()
-def fit_skip_maps(bb, texts, held_texts, cut: int, mode: str = "normed", lams=LAMS, log=print) -> SkipMaps:
+def fit_skip_maps(bb, texts, held_texts, cut: int, mode: str = "normed", lams=LAMS, log=print, alphas=()) -> SkipMaps:
     """Ridge per layer j >= cut on [x, 1] from the normal equations (float64 sums on the GPU); one ridge strength
     (relative to the mean diagonal) for all layers, by held-out squared error. Calls bb with the skip off."""
     prev, bb.skip_state = getattr(bb, "skip_state", None), None
     try:
         L, D, dev = len(bb.lm.layers), bb.hidden_size, bb.device
-        XtX = torch.zeros(D + 1, D + 1, device=dev, dtype=torch.float64)
-        XtY = {j: torch.zeros(D + 1, D, device=dev, dtype=torch.float64) for j in range(cut, L)}
+        Df = (1 + len(alphas)) * D
+        XtX = torch.zeros(Df + 1, Df + 1, device=dev, dtype=torch.float64)
+        XtY = {j: torch.zeros(Df + 1, D, device=dev, dtype=torch.float64) for j in range(cut, L)}
         n = 0
         for i, t in enumerate(texts):
-            X, Y = _pairs(bb, t, cut, mode)
+            X, Y = _pairs(bb, t, cut, mode, alphas)
             XtX += (X.T @ X).double()
             for j in Y:
                 XtY[j] += (X.T @ Y[j]).double()
             n += len(X)
             if (i + 1) % 50 == 0:
                 log(f"  fit cut {cut} {mode}: {i + 1}/{len(texts)} states, {n} tokens")
-        held = [_pairs(bb, t, cut, mode) for t in held_texts]
+        held = [_pairs(bb, t, cut, mode, alphas) for t in held_texts]
         scale = float(XtX.diagonal()[:-1].mean())
         ev, Q = torch.linalg.eigh(XtX)
         ev, Q = ev.float(), Q.float()
@@ -260,7 +306,7 @@ def fit_skip_maps(bb, texts, held_texts, cut: int, mode: str = "normed", lams=LA
                 e += sum(float((X @ W - Y[j]).pow(2).sum()) for X, Y in held)
             err[lam] = e
         lam = min(err, key=err.get)
-        Ws = torch.empty(L - cut, D, D, dtype=torch.bfloat16, device=dev)
+        Ws = torch.empty(L - cut, Df, D, dtype=torch.bfloat16, device=dev)
         bs = torch.empty(L - cut, D, dtype=torch.bfloat16, device=dev)
         rel = {}
         for j in P:
@@ -268,7 +314,7 @@ def fit_skip_maps(bb, texts, held_texts, cut: int, mode: str = "normed", lams=LA
             Ws[j - cut], bs[j - cut] = W[:-1].bfloat16(), W[-1].bfloat16()
             num = sum(float((X @ W - Y[j]).pow(2).sum()) for X, Y in held)
             rel[j] = (num / sum(float(Y[j].pow(2).sum()) for _, Y in held)) ** 0.5
-        maps = SkipMaps(cut, mode, Ws, bs, lam)
+        maps = SkipMaps(cut, mode, Ws, bs, lam, alphas)
         maps.meta = {"n_tokens": n, "n_states": len(texts), "lambda": lam, "held_err": {str(k): v for k, v in err.items()},
                      "held_rel_err": {str(j): v for j, v in rel.items()}}
         return maps

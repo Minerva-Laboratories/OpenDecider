@@ -311,18 +311,31 @@ class Backbone(nn.Module):
         pass (exact up to float error), but activation memory is bounded by the chunk, not by T.
         Returns (hidden features over all T, or None if not keep_hidden; cache)."""
         C = self.cfg.prefill_chunk or ids.shape[1]
-        if getattr(self, "skip_state", None) is not None and not keep_hidden and not torch.is_grad_enabled():
+        sk = getattr(self, "skip_state", None)
+        if sk is not None and not keep_hidden and not torch.is_grad_enabled():
             from .skipkv import skipping            # upper layers write only their cache (the features are not used)
-            with skipping(self.lm, self.skip_state):
-                return self._prefill(ids, mask, layers, cache, keep_hidden, C)
+            past0 = cache.get_seq_length() if cache is not None else 0
+            R = min(getattr(sk, "tail", 0), ids.shape[1] - 1)
+            head = ids.shape[1] - R
+            with skipping(self.lm, sk):
+                _, cache = self._prefill(ids[:, :head], mask[:, :head], layers, cache, False, C, sk)
+            if R:                                    # the last R tokens through every layer, on the skipped cache
+                pm = mask[:, :head]
+                if past0:
+                    pm = torch.cat([torch.ones(ids.shape[0], past0, dtype=torch.bool, device=mask.device), pm], 1)
+                _, cache = self._prefill(ids[:, head:], mask[:, head:], layers, cache, False, C, pmask0=pm)
+            return None, cache
         return self._prefill(ids, mask, layers, cache, keep_hidden, C)
 
-    def _prefill(self, ids, mask, layers, cache, keep_hidden, C):
+    def _prefill(self, ids, mask, layers, cache, keep_hidden, C, skip=None, pmask0=None):
         feats = []
         past = cache.get_seq_length() if cache is not None else 0
-        pmask = torch.ones(ids.shape[0], past, dtype=torch.bool, device=mask.device) if past else None
+        pmask = pmask0 if pmask0 is not None else (
+            torch.ones(ids.shape[0], past, dtype=torch.bool, device=mask.device) if past else None)
         for a in range(0, ids.shape[1], C):
             b = min(a + C, ids.shape[1])
+            if skip is not None:
+                skip._mask = mask[:, a:b]
             f, cache = self.forward(ids[:, a:b], mask[:, a:b], layers, past_key_values=cache, use_cache=True,
                                     past_mask=pmask)
             pmask = mask[:, :b] if pmask is None else torch.cat([pmask, mask[:, a:b]], 1)

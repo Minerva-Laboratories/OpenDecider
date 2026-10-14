@@ -1586,8 +1586,69 @@ second run with them. Whole mixers above the cut: 0.91 / 3.27 s at cut 24, 0.81 
 - The gain is also smaller: only the prompt pass changes, Mercurius's upper layers are cheaper relative to its MLP
   than the 9B's, and decoding is unchanged.
 - SwiftKV itself trains the upper layers' k/v projections by distillation from the unchanged model for this reason;
-  the closed-form retrofit alone is not enough for generation. Not enabled for generation; would need that
-  self-distillation step (a fine-tune, not done).
+  the closed-form retrofit alone is not enough for generation. Not enabled for generation (diagnosis below).
+
+**Why: not MLA, attention caches in general (2026-10-13).** Same test (30 documents, maps fitted on FineWeb-Edu for
+each model), with chosen caches taken from an exact pass instead of the maps (`--mix`):
+
+| | Loss Δ | KL | Same top-1 | Greedy 32 identical |
+|---|---|---|---|---|
+| Mercurius, exact vs itself (prompt pass in 256-token slices: same math, other rounding) | 0.000 | 0.0040 | 96.3% | 53% |
+| Mercurius cut 24 | +0.008 | 0.0084 | 96.3% | 27% |
+| Mercurius cut 24, attention (MLA) caches exact | +0.003 | 0.0030 | 97.9% | 57% |
+| Mercurius cut 24, DeltaNet caches exact | +0.003 | 0.0057 | 96.7% | 40% |
+| 9B (stock Qwen3.5) cut 24 | +0.006 | 0.0058 | 96.5% | 27% |
+| 9B cut 24, attention caches exact | +0.002 | 0.0019 | 98.3% | 50% |
+| Mercurius cut 16 | +0.082 | 0.085 | 89.1% | 0% |
+| Mercurius cut 16, attention (MLA) caches exact | +0.011 | 0.016 | 94.5% | 17% |
+| Mercurius cut 16, DeltaNet caches exact | +0.047 | 0.048 | 91.7% | 7% |
+| 9B cut 16 | +0.085 | 0.094 | 89.2% | 0% |
+| 9B cut 16, attention caches exact | +0.010 | 0.016 | 94.7% | 17% |
+
+- The stock 9B degrades exactly like Mercurius: the cause is generation, not MLA. In both, the few full-attention
+  layers' predicted caches carry most of the error (4 attention layers against 12 DeltaNet layers above cut 16), and
+  the Mercurius code path is exact (bit-identical caches with the true input, §21.2 check).
+- Within Mercurius's MLA cache (cut 16, one part exact at a time): RoPE key exact KL 0.084 (no change), latent exact
+  0.056, per-group key scale exact 0.125 (worse: it no longer matches the predicted latent). The error is in the
+  latent (key and value content) with its own scale, not in the decoupled RoPE key.
+- Cut 24 is near the model's own rounding noise: top-1 agreement equals the exact model against itself (96.3%), KL
+  2x, greedy identity 27% against 53%. Mercurius (4-bit weights and cache) is greedy-identical to itself only half the
+  time under a different prompt chunking, so greedy identity overstates the damage. Cut 16 is 20x the floor.
+- Calibration does not remove it: the best single temperature is 1.0 (no systematic over/under-confidence), and a
+  ridge map on the final hidden state (full D x D or per dimension, can reorder tokens; fitted on 50 separate
+  documents, strength by held-out KL) makes held-out KL slightly worse (cut 24: 0.0088 -> 0.0096; cut 16: 0.070 ->
+  0.072). The error depends on what the predicted attention caches lose for each context, not on a fixed distortion.
+- Decisions on Mercurius (`scripts/skipkv_serve.py`, its trained decision head): cut 24 typed 97.6% / Banking77
+  100% / injections 99.1% the same answers, accuracy unchanged, state pass 1.18x faster at 15k tokens; cut 16 94.4% /
+  100% / 99.1%, 1.46x faster. As on the 9B, decisions tolerate it.
+
+**Real LLM use, calibration, mitigations (Mercurius-1-4B, 2026-10-13/14).** `scripts/skipkv_tasks.py` (chat template,
+thinking off; answer flips against the exact arm; floor = the exact model with its prompt pass in 32-token slices),
+`scripts/skipkv_calib.py` (option-logit calibrators fitted on half the items, reported on the other half),
+`scripts/skipkv_rankcal.py` (ODIR over the top-16 next-token candidates).
+
+| Task (300 items) | exact | floor (flips) | cut 24 (flips) | cut 16 (flips) | cut 16, last 32 prompt tokens exact (flips) |
+|---|---|---|---|---|---|
+| OpenBookQA | 0.797 | 0.803 (2.3%) | 0.813 (6.0%) | 0.403 (63%) | 0.710 (14.3%) |
+| CommonsenseQA | 0.723 | 0.713 (4.3%) | 0.773 (12.7%) | 0.283 (80%) | 0.630 (19.0%) |
+| PubMedQA (yes/no over an abstract) | 0.830 | 0.833 (2.3%) | 0.830 (2.0%) | 0.820 (5.7%) | – |
+
+- Cut 24 costs no accuracy on any task. Its extra answer changes are miscalibration: vector scaling or ODIR fitted to
+  match the exact model on half the items halves them on the other half (CommonsenseQA 12.7% -> 6.3%, floor 4.3%;
+  OpenBookQA 6.0% -> 4.3-4.7%, floor 2.3%).
+- Cut 16 collapses on lettered multiple choice (it picks early letters: A 58%, B 33%, C 3%, D 6% on OpenBookQA) but not
+  on PubMedQA. Calibration recovers only part (CommonsenseQA 0.28 -> 0.40 with ODIR): information is lost, mostly for
+  the last prompt tokens. Running the last 32 prompt tokens through every layer restores most of it (0.40 -> 0.71,
+  0.28 -> 0.63).
+- Next-token generation (60 documents, ODIR over the top-16 candidates fitted on 40, tested on 20): no change at any
+  cut (cut 24 top-1 agreement 95.9% raw / 95.8% ODIR, floor 96.6%; gold-token accuracy 0.513 against exact 0.511).
+  There is nothing systematic to calibrate in free generation; cut 24 also loses no next-token accuracy.
+- Mitigations on the generation test (KL, 30 documents): cut 16 0.085; last 32 prompt tokens exact 0.068; last 128
+  exact 0.043; maps with causal EMA context features (alphas 0.9, 0.99; `fit_skip_maps(alphas=...)`) 0.079; both
+  0.063. Cut 24 is unchanged by either (0.0082-0.0094; floor 0.0040). The exact tail (`SkipMaps.tail`) is the useful
+  mitigation; EMA context features barely help.
+- GSM8K (20 problems, 200-token cap, greedy) was not informative: replies were cut at the cap (exact 5% accuracy),
+  and final answers changed in 55% (floor) and 50% (cut 24) of problems alike.
 
 ## Sources for numbers not measured here
 
