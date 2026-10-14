@@ -8,6 +8,7 @@ so cards and docs/RESULTS.md come from the same files.
 """
 import json
 import os
+import re
 import sys
 
 sys.path.insert(0, "src"); sys.path.insert(0, ".")
@@ -19,6 +20,8 @@ QWEN9B = {"repo_id": "Qwen/Qwen3.5-9B", "revision": "c202236235762e1c871ad0ccb60
 AWQ9B = {"repo_id": "cyankiwi/Qwen3.5-9B-AWQ-4bit", "revision": "156edc4bbeb8d1910ee7be9196bafaf1bc052156"}
 GGUF9B = {"repo_id": "unsloth/Qwen3.5-9B-MTP-GGUF", "revision": "9716a636ee4bddc3fed678220b7a33dd2a4160ae",
           "gguf_file": "Qwen3.5-9B-Q4_0.gguf", "config_repo": QWEN9B["repo_id"], "config_revision": QWEN9B["revision"]}
+MERCURIUS = {"repo_id": "Minerva-Laboratories/Mercurius-1-4B", "revision": "9a3e1cfff25b",
+             "local_env": "OPENDECIDER_MERCURIUS_ROOT"}           # runs on the user's own copy: nothing downloaded
 PUBLIC = [("banking77_8way", "Banking77 8-way"), ("prompt_injections", "Prompt-injection detection"),
           ("openbookqa", "OpenBookQA"), ("commonsenseqa", "CommonsenseQA"), ("pubmedqa", "PubMedQA")]
 
@@ -46,6 +49,35 @@ RELEASES = [
      "backbone_note": f"frozen Qwen3.5-9B, Q4_0 GGUF from {GGUF9B['repo_id']} (Apache-2.0)",
      "requirements": "CUDA GPU with about 9 GB free for states up to 1k tokens (10.2 GB at 15k). Disk: 5.6 GB for the "
                      "GGUF backbone."},
+    {"name": "opendecider-mercurius-4b", "title": "OpenDecider on Mercurius-1-4B (head only)",
+     "base_model": MERCURIUS["repo_id"], "run": "runs/x4b-mercurius-lora", "default": "mercurius",
+     "variants": {"mercurius": ("mercurius", MERCURIUS)}, "bench": ("", "", {}), "evals": "x4b-mercurius-lora",
+     "summary": "The 2B checkpoint's trunk and heads moved to Mercurius-1-4B's deployed features (NF4 weights, "
+                "TurboQuant 4-bit latent attention cache) with a closed-form ridge map, then trained for 500 steps on "
+                "the same clean corpus (best validation loss at step 300); the backbone stays frozen and unmodified "
+                "(no adapters inside it).",
+     "backbone_note": "frozen Mercurius-1-4B (Minerva Laboratories; a Qwen3.5-4B conversion, Apache-2.0) in its "
+                      "deployed form",
+     "weights_note": "This repository holds only the decision head (trunk and heads, fp16 safetensors). It runs on a "
+                     "copy of Mercurius-1-4B you already have; nothing is downloaded, and the backbone is not modified, "
+                     "so the same loaded weights can serve generation and decisions.",
+     "quickstart": """```python
+from opendecider.hub import load_decider
+dec = load_decider("Minerva-Laboratories/opendecider-mercurius-4b",
+                   backbone_path="/path/to/mercurius-root")      # or set OPENDECIDER_MERCURIUS_ROOT
+print(dec.decide({"state": {"ticket": "I was charged twice and want my money back."},
+                  "questions": {"route": {"type": "choice", "prompt": "Which team handles this?",
+                                           "options": ["billing", "technical", "refund", "other"]}}}))
+llm = dec.model.backbone.lm     # the same Mercurius trunk (embed_tokens, layers, norm; LM head tied to the embedding)
+```
+
+The Mercurius root is the working folder Mercurius builds its deployed model from: `ckpt/qwen3.5-4b-stageAB/`,
+`ckpt/adapters-v3-absorb-step3900.pt`, `ckpt/tq_rotations_0fece5aeb2.pt`,
+`cache/mla_seqcal_667126e299_covs.pt` and `cache/mla_seqcal_667126e299_groups.json` (the last four from the
+Mercurius-1-4B repository at revision 9a3e1cfff25b), plus the Mercurius code (`MERCURIUS_CODE`, default
+`/mnt/ext/opendecider/code/mercurius`).""",
+     "requirements": "CUDA GPU (bitsandbytes NF4). About 2.3 GB of weights on the GPU, 2.9 GB peak for a 0.8k-token "
+                     "state, 3.2 GB at 15k (4k prefill slices). The Mercurius root and code as above."},
     {"name": "opendecider-9b-awq", "title": "OpenDecider 9B AWQ (4-bit)", "base_model": QWEN9B["repo_id"], "run": "runs/x2b-clean3-stitch9b-awq",
      "default": "awq", "variants": {"awq": ("awq", AWQ9B, {"table_quant": "q4"})},
      "bench": ("runs/quant/9b_clean3_awq.json", "runs/quant/serving/9b_awq_{cfg}_q4t.json", {"awq": "awq:int8"}),
@@ -110,6 +142,15 @@ def _ci(v):
     return f"{v['value']:.3f} [{v['lo']:.3f}, {v['hi']:.3f}]"
 
 
+def td_md(td):
+    if td is None:
+        return ""
+    return f"""Secondary, not a correctness benchmark: on typed-decisions (2,000 decisions whose gold labels are the answers of a ~4B
+teacher model, so the score measures agreement with that teacher; the dataset card lists the teacher's self-agreement at 0.735)
+this checkpoint scores {td['accuracy'][0]:.3f} [{td['accuracy'][1]:.3f}, {td['accuracy'][2]:.3f}] (KL to the teacher
+distribution {td['kl'][0]:.3f}). We do not train or tune on it."""
+
+
 def results(rel, ck):
     """Markdown tables for one release, read from its evaluation outputs."""
     from eval.typed_decisions import load_preds, print_metrics
@@ -118,7 +159,7 @@ def results(rel, ck):
     for key, label in PUBLIC:
         raw = json.load(open(f"runs/public-{tag}/eval_{key}.json"))["raw"]
         rows.append(f"| {label} | {_ci(raw['accuracy'])} | {raw['nll']['value']:.3f} |")
-    td = print_metrics(tag, list(load_preds(f"runs/td-{tag}").values()))
+    td = print_metrics(tag, list(load_preds(f"runs/td-{tag}").values())) if os.path.isdir(f"runs/td-{tag}") else None
     none_path = f"runs/none-{tag}/results.json"
     none_md = ""
     if os.path.exists(none_path):
@@ -136,10 +177,7 @@ Accuracy with 95% bootstrap confidence intervals (1,000 resamples).
 |---|---|---|
 {chr(10).join(rows)}
 
-Secondary, not a correctness benchmark: on typed-decisions (2,000 decisions whose gold labels are the answers of a ~4B
-teacher model, so the score measures agreement with that teacher; the dataset card lists the teacher's self-agreement at 0.735)
-this checkpoint scores {td['accuracy'][0]:.3f} [{td['accuracy'][1]:.3f}, {td['accuracy'][2]:.3f}] (KL to the teacher
-distribution {td['kl'][0]:.3f}). We do not train or tune on it.
+{td_md(td)}
 
 {none_md}
 
@@ -152,7 +190,7 @@ def variants_table(rel):
     """Memory and latency from one fresh process per config; accuracy from the shared-process run (memory left by one
     config inflates the next in a shared process, accuracy is unaffected)."""
     acc_path, mem_pat, cfg_of = rel["bench"]
-    if not os.path.exists(acc_path):
+    if not acc_path or not os.path.exists(acc_path):
         return ""
     acc = json.load(open(acc_path))
     rows = []
@@ -177,6 +215,20 @@ trained on the default variant's features.
 {chr(10).join(rows)}"""
 
 
+DEFAULT_WEIGHTS_NOTE = ("This checkpoint contains the trained trunk, heads and adapters (fp16\nsafetensors). The backbone "
+                        "is downloaded from its original repository at a pinned revision on first use.")
+
+
+def default_quickstart(rel):
+    return f"""```python
+from opendecider.hub import load_decider
+dec = load_decider("checkpoints/{rel['name']}")
+print(dec.decide({{"state": {{"ticket": "I was charged twice and want my money back."}},
+                   "questions": {{"route": {{"type": "choice", "prompt": "Which team handles this?",
+                                            "options": ["billing", "technical", "refund", "other"]}}}}}}))
+```"""
+
+
 def card(rel, ck):
     return f"""---
 license: apache-2.0
@@ -189,20 +241,13 @@ tags: [decision-model, classification, calibration, qwen3.5]
 # {rel['title']}
 
 Calibrated typed decisions (choice, yes/no, ordinal score) with an explicit "none of the above" option, on a
-{rel['backbone_note']}. {rel['summary']} This checkpoint contains the trained trunk, heads and adapters (fp16
-safetensors). The backbone is downloaded from its original repository at a pinned revision on first use.
+{rel['backbone_note']}. {rel['summary']} {rel.get('weights_note', DEFAULT_WEIGHTS_NOTE)}
 
 ## Quickstart
 
-```python
-from opendecider.hub import load_decider
-dec = load_decider("checkpoints/{rel['name']}")
-print(dec.decide({{"state": {{"ticket": "I was charged twice and want my money back."}},
-                   "questions": {{"route": {{"type": "choice", "prompt": "Which team handles this?",
-                                            "options": ["billing", "technical", "refund", "other"]}}}}}}))
-```
+{rel.get('quickstart', default_quickstart(rel))}
 
-Or serve it: `python -m opendecider.serve --model checkpoints/{rel['name']}`.
+Or serve it: `python -m opendecider.serve --model {'checkpoints/' + rel['name'] if 'quickstart' not in rel else 'Minerva-Laboratories/' + rel['name']}`.
 
 {results(rel, ck)}
 
@@ -227,11 +272,20 @@ def variants(base_cfg, entries):
 
 
 def main():
+    """Every release, or the ones named on the command line; --root DIR exports outside checkpoints/."""
     import torch
+    args = sys.argv[1:]
+    root = "checkpoints"
+    if "--root" in args:
+        i = args.index("--root")
+        root, args = args[i + 1], args[:i] + args[i + 2:]
     for rel in RELEASES:
+        if args and rel["name"] not in args:
+            continue
         ck = torch.load(f"{rel['run']}/model.pt", map_location="cpu", weights_only=False)
-        out = f"checkpoints/{rel['name']}"
-        export(f"{rel['run']}/model.pt", out, variants(ck["backbone_cfg"], rel["variants"]), rel["default"], card(rel, ck),
+        out = f"{root}/{rel['name']}"
+        export(f"{rel['run']}/model.pt", out, variants(ck["backbone_cfg"], rel["variants"]), rel["default"],
+               re.sub(r"\n{3,}", "\n\n", card(rel, ck)),
                info={"name": rel["name"], "trained_from": f"{rel['run']} (step {ck['extra'].get('step')})"})
         files = sorted(os.listdir(out))
         print(out, [(f, round(os.path.getsize(os.path.join(out, f)) / 2 ** 20, 1)) for f in files])

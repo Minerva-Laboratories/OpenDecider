@@ -1650,6 +1650,51 @@ thinking off; answer flips against the exact arm; floor = the exact model with i
 - GSM8K (20 problems, 200-token cap, greedy) was not informative: replies were cut at the cap (exact 5% accuracy),
   and final answers changed in 55% (floor) and 50% (cut 24) of problems alike.
 
+### 21.3 Cut-16 fixes and what the skip saves (2026-10-14)
+
+Three fixes for cut 16, all keeping the backbone frozen (Mercurius-1-4B, same tests as 21.2):
+- **exact tail** (`SkipMaps.tail` / `MLPSurrogates.tail`): the last R prompt tokens run every layer on top of the
+  skipped cache;
+- **attention-fitted maps** (`scripts/skipkv_attnfit.py`): each attention layer's map fine-tuned (Adam, 400 steps,
+  L2 pull to the closed-form map) so later tokens' queries get the same attention output from the predicted prompt
+  keys / values as from the exact ones (targets from the model's own exact pass, MLA through its float path). Held-out
+  relative attention error per layer: 0.024 -> 0.023, 0.054 -> 0.042, 0.024 -> 0.020, 0.0031 -> 0.0024;
+- **MLP-only skip** (`skipkv.MLPSurrogates`, `fit_mlp_surrogates`): layers from the cut keep their attention and
+  DeltaNet mixers, run on the propagated stream (context mixing stays real); only each MLP is replaced by a ridge map
+  from its input to its output.
+
+| cut 16 variant | Generation KL (30 docs) | Loss Δ | OpenBookQA (exact 0.797) | CommonsenseQA (exact 0.723) |
+|---|---|---|---|---|
+| closed-form maps | 0.085 | +0.082 | 0.403 | 0.283 |
+| + exact tail 32 | 0.068 | +0.075 | 0.710 | 0.630 |
+| + exact tail 128 | 0.043 | +0.052 | – | – |
+| attention-fitted maps | 0.078 | +0.076 | 0.407 | 0.283 |
+| attention-fitted + tail 32 | 0.062 | +0.069 | 0.723 | 0.640 |
+| MLP-only skip | 0.050 | +0.051 | 0.437 | 0.257 |
+| MLP-only skip + tail 32 | 0.042 | +0.047 | 0.723 | 0.623 |
+
+(noise floor: generation KL 0.004; OpenBookQA 0.803, CommonsenseQA 0.713.) The exact tail is what restores lettered
+multiple choice; the attention fit and the MLP-only skip lower the generation KL (MLP-only + tail is the best, about
+half of cut 16's) but leave the multiple-choice accuracy where the tail alone puts it. None brings cut 16 near cut 24
+(KL 0.008); for generation, cut 24 remains the setting that keeps outputs within the model's own noise.
+
+**Time and memory** (`scripts/skipkv_bench.py`, prompt pass and time to first token, median of 3, FineWeb-Edu text;
+eager loader, no serving kernels):
+
+| | Mercurius-1-4B prompt 1k / 4k / 15k | 9B prompt 1k / 4k / 15k |
+|---|---|---|
+| exact | 1.01 / 3.71 / 16.6 s | 2.17 / 5.90 / 21.2 s |
+| cut 24 | 0.85 / 3.14 / 13.9 s (1.2x) | 1.71 / 4.63 / 17.1 s (1.25x) |
+| cut 16 | 0.68 / 2.53 / 10.8 s (1.5x) | 1.26 / 3.46 / 12.8 s (1.65x) |
+
+- Memory: no saving. Every layer keeps its cache (later tokens read it), so the KV / state cache is the same size
+  (Mercurius 0.05 / 0.08 GB at 1k / 15k tokens, 4-bit latents; 9B 0.08 / 0.51 GB) and peak memory is unchanged within
+  0.03 GB; the maps add 0.10 / 0.20 GB (Mercurius cut 24 / 16) and 0.25 / 0.50 GB (9B). A cache saving would need
+  cross-layer sharing (SwiftKV's AcrossKV, trained) or recomputing upper caches from the cut's state; neither pays at
+  these sizes (weights dominate: 2.3 GB / 8.6 GB).
+- The tail's measured cost there (+0.4 s Mercurius, +0.9 s 9B at any length) is the eager loader re-expanding int8
+  weights on every forward call, not the 32 tokens; serving-kernel timings and the scaling to 256k tokens follow.
+
 ## Sources for numbers not measured here
 
 Retrieved 2026-09-23. All are reported by their authors or by third parties and were not reproduced.

@@ -108,3 +108,26 @@ def test_fit_with_context_features():
     maps = fit_skip_maps(bb, texts[:10], texts[10:], 4, "normed", lams=(1e-6,), log=lambda *_: None, alphas=(0.9,))
     assert maps.W.shape == (4, 2 * bb.hidden_size, bb.hidden_size) and maps.alphas == (0.9,)
     assert max(maps.meta["held_rel_err"].values()) < 0.05, maps.meta
+
+
+@pytest.mark.parametrize("tail", [0, 4])
+def test_mlp_surrogates_exact_when_mlp_is_linear(tail):
+    """Upper MLPs that output zero (down_proj zeroed): the zero surrogate is exact, mixers run as before."""
+    from opendecider.skipkv import MLPSurrogates, fit_mlp_surrogates
+    bb = tiny_backbone(kv_quant="none")
+    for layer in bb.lm.layers[3:]:
+        layer.mlp.down_proj.weight.data.zero_()
+    seqs = bb.tokenize(state_texts(["a longer state " * 10 + "x", "short state"]))
+    exact, _ = bb.prefix_cache_batch(seqs, quantize=False)
+    D, U = bb.hidden_size, len(bb.lm.layers) - 3
+    bb.skip_state = MLPSurrogates(3, torch.zeros(U, D, D), torch.zeros(U, D), tail=tail)
+    try:
+        skip, _ = bb.prefix_cache_batch(seqs, quantize=False)
+    finally:
+        bb.skip_state = None
+    for k, t in exact.tensors.items():
+        assert torch.allclose(t, skip.tensors[k], atol=1e-5), k
+    assert all(type(l.mlp).__name__ != "_LinearMLP" for l in bb.lm.layers)
+    texts = state_texts([f"state number {i} " * 6 for i in range(8)])
+    sur = fit_mlp_surrogates(bb, texts[:6], texts[6:], 3, lams=(1e-6,), log=lambda *_: None)
+    assert sur.W.shape == (U, D, D) and float(sur.W.float().abs().max()) < 1e-3

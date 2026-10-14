@@ -136,10 +136,16 @@ def main():
             if not a.no_base:
                 arms[f"cut{c}"] = Arm(bb, SkipMaps.load(os.path.join(a.maps_dir, f"{name}_lm_cut{c}_normed.pt"), bb.device))
             for v in a.variants:
-                f = f"{name}_lm_cut{c}_normed" + (f"_ema{'-'.join(map(str, a.alphas))}" if v.startswith("ema") else "")
                 m = re.search(r"tail(\d+)", v)
-                arms[f"cut{c}_{v}"] = Arm(bb, SkipMaps.load(os.path.join(a.maps_dir, f + ".pt"), bb.device,
-                                                            tail=int(m.group(1)) if m else 0))
+                tail = int(m.group(1)) if m else 0
+                if v.startswith("mlp"):
+                    from opendecider.skipkv import MLPSurrogates
+                    arms[f"cut{c}_{v}"] = Arm(bb, MLPSurrogates.load(os.path.join(a.maps_dir, f"{name}_mlp{c}.pt"),
+                                                                     bb.device, tail=tail))
+                    continue
+                f = f"{name}_lm_cut{c}_normed" + (f"_ema{'-'.join(map(str, a.alphas))}" if v.startswith("ema") else
+                                                  "_attnfit" if v.startswith("attnfit") else "")
+                arms[f"cut{c}_{v}"] = Arm(bb, SkipMaps.load(os.path.join(a.maps_dir, f + ".pt"), bb.device, tail=tail))
         enc = lambda t: bb.tok(t, add_special_tokens=False)["input_ids"]
         res = {"ckpt": a.ckpt}
         for task in a.tasks:

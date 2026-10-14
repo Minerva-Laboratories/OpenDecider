@@ -24,7 +24,7 @@ sys.path.insert(0, "src"); sys.path.insert(0, ".")
 os.environ["OPENDECIDER_STATE_CACHE_MB"] = "0"
 from opendecider.checkpoint import load_model  # noqa: E402
 from opendecider.guards import gpu_lock  # noqa: E402
-from opendecider.skipkv import SkipMaps, _stock, fit_skip_maps, skipped_share  # noqa: E402
+from opendecider.skipkv import MLPSurrogates, SkipMaps, _stock, fit_mlp_surrogates, fit_skip_maps, skipped_share  # noqa: E402
 
 DATA = "/mnt/ext/mercurius/data/fineweb-edu/sample/10BT/000_00000.parquet"
 
@@ -223,9 +223,30 @@ def main():
                     emaps[c].save(path)
                 torch.cuda.empty_cache()
 
+        smaps = {}
+        if any(v.startswith("mlp") for v in a.variants):
+            for c in a.cuts:
+                path = os.path.join(a.maps_dir, f"{name}_mlp{c}.pt")
+                if os.path.exists(path):
+                    smaps[c] = MLPSurrogates.load(path, bb.device)
+                else:
+                    t = time.time()
+                    smaps[c] = fit_mlp_surrogates(bb, calib, held, c)
+                    smaps[c].meta |= {"fit_seconds": time.time() - t, "ckpt": a.ckpt, "data": DATA}
+                    smaps[c].save(path)
+                torch.cuda.empty_cache()
+        amaps = {}
+        for v in a.variants:
+            if v.startswith("attnfit"):
+                for c in a.cuts:
+                    amaps[c] = SkipMaps.load(os.path.join(a.maps_dir, f"{name}_lm_cut{c}_normed_attnfit.pt"), bb.device)
+
         def variant(c, v):
-            base = emaps[c] if v.startswith("ema") else maps[c]
             m = re.search(r"tail(\d+)", v)
+            if v.startswith("mlp"):
+                base = smaps[c]
+                return MLPSurrogates(base.cut, base.W, base.b, base.lam, int(m.group(1)) if m else 0)
+            base = emaps[c] if v.startswith("ema") else amaps[c] if v.startswith("attnfit") else maps[c]
             return SkipMaps(base.cut, base.mode, base.W, base.b, base.lam, base.alphas, int(m.group(1)) if m else 0)
         hcorr = {}
         if any(m.startswith("corr_") for m in a.mix):

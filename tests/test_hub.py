@@ -21,7 +21,7 @@ def test_export_then_load_roundtrip(tmp_path, monkeypatch):
     assert len(set(cfg["weight_map"].values())) > 2                     # sharded
     assert any("::part" in k for k in cfg["weight_map"])                # one matrix split across shards
     # backbone resolution is network-bound: hand the loader the same tiny backbone
-    monkeypatch.setattr(hub, "resolve_backbone", lambda s: {k: v for k, v in s.items() if k != "source"})
+    monkeypatch.setattr(hub, "resolve_backbone", lambda s, path=None: {k: v for k, v in s.items() if k != "source"})
     import opendecider.backbone as B
     monkeypatch.setattr(B.Backbone, "load", classmethod(lambda cls, c: bb))
     m2, extra = hub.load_model(str(out), device="cpu")

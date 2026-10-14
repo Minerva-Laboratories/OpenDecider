@@ -21,6 +21,7 @@ from __future__ import annotations
 import contextlib
 import sys
 
+import numpy as np
 import torch
 from torch import nn
 
@@ -89,6 +90,9 @@ class SkipMaps:
             self._fh, self._feat = h, f.to(h.dtype).reshape(-1, f.shape[-1])
         i = j - self.cut
         return torch.addmm(self.b[i].to(h.dtype), self._feat, self.W[i].to(h.dtype)).view(h.shape)
+
+    def nbytes(self) -> int:
+        return self.W.numel() * self.W.element_size() + self.b.numel() * self.b.element_size()
 
     def save(self, path: str, meta: dict | None = None):
         torch.save({"cut": self.cut, "mode": self.mode, "lam": self.lam, "W": self.W.cpu(), "b": self.b.cpu(),
@@ -228,11 +232,60 @@ class CacheOnlyLayer(nn.Module):
         cache.update_recurrent_state(state, la.layer_idx)
 
 
+class _LinearMLP(nn.Module):
+    """Stand-in for a decoder layer's MLP: its input (post-attention norm output) @ W + b."""
+
+    def __init__(self, W, b):
+        super().__init__()
+        self.W, self.b = W, b
+
+    def forward(self, x):
+        return torch.addmm(self.b.to(x.dtype), x.reshape(-1, x.shape[-1]), self.W.to(x.dtype)).view(x.shape)
+
+
+class MLPSurrogates:
+    """The other way to cut a state pass: layers >= cut keep their token mixers (attention, DeltaNet), which run on the
+    propagated residual stream, so context mixing stays real; only their MLPs are replaced by one linear map each (ridge
+    from the MLP's input to its output, fitted on exact passes). W (U, D, D), b (U, D) bf16. tail as in SkipMaps."""
+
+    def __init__(self, cut: int, W: torch.Tensor, b: torch.Tensor, lam: float = 0.0, tail: int = 0):
+        self.cut, self.W, self.b, self.lam, self.tail = cut, W, b, lam, tail
+        self.meta: dict = {}
+
+    def reset(self):
+        pass
+
+    def nbytes(self) -> int:
+        return self.W.numel() * self.W.element_size() + self.b.numel() * self.b.element_size()
+
+    def save(self, path: str):
+        torch.save({"kind": "mlp", "cut": self.cut, "lam": self.lam, "W": self.W.cpu(), "b": self.b.cpu(),
+                    "meta": self.meta}, path)
+
+    @classmethod
+    def load(cls, path: str, device="cuda", tail: int = 0) -> "MLPSurrogates":
+        d = torch.load(path, map_location="cpu", weights_only=False)
+        m = cls(d["cut"], d["W"].to(device), d["b"].to(device), d.get("lam", 0.0), tail)
+        m.meta = d.get("meta", {})
+        return m
+
+
 @contextlib.contextmanager
-def skipping(lm: nn.Module, maps: SkipMaps):
-    """Layers >= maps.cut replaced by CacheOnlyLayer for the duration (state passes only)."""
+def skipping(lm: nn.Module, maps):
+    """Layers >= maps.cut replaced by CacheOnlyLayer (SkipMaps), or their MLPs by linear stand-ins (MLPSurrogates),
+    for the duration (state passes only)."""
     saved = {}
     maps.reset()
+    if isinstance(maps, MLPSurrogates):
+        try:
+            for j in range(maps.cut, len(lm.layers)):
+                saved[j] = lm.layers[j].mlp
+                lm.layers[j].mlp = _LinearMLP(maps.W[j - maps.cut], maps.b[j - maps.cut])
+            yield
+        finally:
+            for j, mlp in saved.items():
+                lm.layers[j].mlp = mlp
+        return
     try:
         for j in range(maps.cut, len(lm.layers)):
             saved[j] = lm.layers[j]
@@ -318,6 +371,60 @@ def fit_skip_maps(bb, texts, held_texts, cut: int, mode: str = "normed", lams=LA
         maps.meta = {"n_tokens": n, "n_states": len(texts), "lambda": lam, "held_err": {str(k): v for k, v in err.items()},
                      "held_rel_err": {str(j): v for j, v in rel.items()}}
         return maps
+    finally:
+        bb.skip_state = prev
+
+
+@torch.no_grad()
+def fit_mlp_surrogates(bb, texts, held_texts, cut: int, lams=LAMS, log=print) -> MLPSurrogates:
+    """Ridge per layer j >= cut from the MLP's input to its output, on exact passes (the inputs at deployment come from
+    a stream where earlier MLPs are surrogates; fitted on exact inputs here). One relative ridge strength per layer, by
+    held-out squared error."""
+    prev, bb.skip_state = getattr(bb, "skip_state", None), None
+    L, D, dev = len(bb.lm.layers), bb.hidden_size, bb.device
+    XtX = {j: torch.zeros(D + 1, D + 1, device=dev, dtype=torch.float64) for j in range(cut, L)}
+    XtY = {j: torch.zeros(D + 1, D, device=dev, dtype=torch.float64) for j in range(cut, L)}
+
+    def pairs(text):
+        st, hs = {}, []
+        for j in range(cut, L):
+            hs.append(bb.lm.layers[j].mlp.register_forward_hook(
+                lambda m, a, o, j=j: st.__setitem__(j, (a[0][0].detach().float(), o[0].detach().float()))))
+        try:
+            bb.prefix_cache_batch(bb.tokenize([text]))
+        finally:
+            for h in hs:
+                h.remove()
+        return {j: (torch.cat([x, torch.ones(len(x), 1, device=dev)], 1), y) for j, (x, y) in st.items()}
+    try:
+        n = 0
+        for i, t in enumerate(texts):
+            for j, (X, Y) in pairs(t).items():
+                XtX[j] += (X.T @ X).double()
+                XtY[j] += (X.T @ Y).double()
+            n += len(X)
+            if (i + 1) % 50 == 0:
+                log(f"  fit mlp surrogates from {cut}: {i + 1}/{len(texts)} states, {n} tokens")
+        held = [pairs(t) for t in held_texts]
+        Ws = torch.empty(L - cut, D, D, dtype=torch.bfloat16, device=dev)
+        bs = torch.empty(L - cut, D, dtype=torch.bfloat16, device=dev)
+        rel, lam_of = {}, {}
+        for j in range(cut, L):
+            A, B = XtX.pop(j), XtY.pop(j)
+            sc = float(A.diagonal()[:-1].mean())
+            best = None
+            for lam in lams:
+                W = torch.linalg.solve(A + lam * sc * torch.eye(D + 1, dtype=A.dtype, device=dev), B).float()
+                e = sum(float((h[j][0] @ W - h[j][1]).pow(2).sum()) for h in held)
+                if best is None or e < best[0]:
+                    best = (e, lam, W)
+            e, lam_of[j], W = best
+            Ws[j - cut], bs[j - cut] = W[:-1].bfloat16(), W[-1].bfloat16()
+            rel[j] = (e / max(sum(float(h[j][1].pow(2).sum()) for h in held), 1e-30)) ** 0.5
+        sur = MLPSurrogates(cut, Ws, bs, float(np.median(list(lam_of.values()))))
+        sur.meta = {"n_tokens": n, "n_states": len(texts), "lambda": {str(k): v for k, v in lam_of.items()},
+                    "held_rel_err": {str(k): v for k, v in rel.items()}}
+        return sur
     finally:
         bb.skip_state = prev
 

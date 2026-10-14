@@ -98,11 +98,19 @@ def _fetch(repo: str, revision: str, patterns=None, filename: str | None = None)
     return d
 
 
-def resolve_backbone(spec: dict) -> dict:
-    """Backbone variant spec (from config.json) -> BackboneConfig kwargs with a local path."""
+def resolve_backbone(spec: dict, path: str | None = None) -> dict:
+    """Backbone variant spec (from config.json) -> BackboneConfig kwargs with a local path. A source with "local_env"
+    is a backbone the user already has (e.g. Mercurius-1-4B's working folder, shared with its LLM use): its path comes
+    from `path` or that environment variable, nothing is downloaded."""
     spec = dict(spec)
     src = spec.pop("source")
-    if src.get("gguf_file"):                                         # GGUF weights + config/tokenizer from the base
+    if src.get("local_env"):
+        p = path or os.environ.get(src["local_env"])
+        if not p or not os.path.isdir(p):
+            raise ValueError(f"this checkpoint runs on a local copy of {src['repo_id']}: pass backbone_path=... or set "
+                             f"{src['local_env']} to its folder{f' (got {p!r})' if p else ''}")
+        spec["path"] = os.path.abspath(p)
+    elif src.get("gguf_file"):                                         # GGUF weights + config/tokenizer from the base
         g = _fetch(src["repo_id"], src["revision"], filename=src["gguf_file"])
         base = _fetch(src["config_repo"], src["config_revision"], patterns=TOKENIZER_FILES)
         d = os.path.join(_cache_dir(), f"{src['repo_id'].replace('/', '__')}@{src['revision'][:12]}-gguf")
@@ -122,8 +130,9 @@ def resolve_backbone(spec: dict) -> dict:
 
 
 def load_model(path_or_repo: str, backbone: str | None = None, device: str | None = None, kv_quant: str | None = None,
-               revision: str | None = None):
-    """-> (model, extra). device: cuda if available, else cpu (reference kernels; slow but works)."""
+               revision: str | None = None, backbone_path: str | None = None):
+    """-> (model, extra). device: cuda if available, else cpu (reference kernels; slow but works). backbone_path: the
+    local backbone folder for variants that run on a copy the user already has (no download)."""
     from safetensors import safe_open
     from .backbone import Backbone, BackboneConfig, use_reference_kernels
     from .models import ModelConfig, build_model
@@ -132,7 +141,7 @@ def load_model(path_or_repo: str, backbone: str | None = None, device: str | Non
     name = backbone or cfg["default_backbone"]
     if name not in cfg["backbones"]:
         raise ValueError(f"unknown backbone variant {name!r}; available: {sorted(cfg['backbones'])}")
-    bspec = resolve_backbone(cfg["backbones"][name])
+    bspec = resolve_backbone(cfg["backbones"][name], backbone_path)
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     if device == "cpu":                       # torch reference kernels; GemLite/AWQ/NF4 need CUDA
         if bspec["weight_quant"] not in ("int8", "none"):
@@ -169,9 +178,9 @@ def load_model(path_or_repo: str, backbone: str | None = None, device: str | Non
 
 
 def load_decider(path_or_repo: str, backbone: str | None = None, device: str | None = None,
-                 kv_quant: str | None = None, revision: str | None = None):
+                 kv_quant: str | None = None, revision: str | None = None, backbone_path: str | None = None):
     from .decider import Decider, prepare_inference_
-    model, extra = load_model(path_or_repo, backbone, device, kv_quant, revision)
+    model, extra = load_model(path_or_repo, backbone, device, kv_quant, revision, backbone_path)
     if not getattr(model.backbone, "is_llamacpp", False):
         prepare_inference_(model)
     return Decider(model, temperature=extra.get("temperature", 1.0),

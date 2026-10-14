@@ -436,8 +436,10 @@ Each folder has a model card (`README.md`) with results, backbone variants and d
 | `checkpoints/opendecider-9b-awq` | 9B in 4 bits, stitched from the 2B (no 9B training); 3 GB less GPU memory | 57.3M parameters, 109 MB | `awq` |
 | `checkpoints/opendecider-2b` | 2B, trained (kept for reproducibility; not featured) | 25.4M parameters, 50 MB | `int8` (default), `w8`, `nf4`, `awq` |
 
-The Mercurius-1-4B head is a research checkpoint (`runs/x4b-mercurius-lora`, not in `checkpoints/` yet): it needs
-Mercurius's own source to build the backbone. The heads were trained on their default variants' features; 4-bit
+The Mercurius-1-4B head is exported head-only (`scripts/export_checkpoints.py opendecider-mercurius-4b`): it runs on a
+Mercurius copy you already have (`load_decider(..., backbone_path=...)` or `OPENDECIDER_MERCURIUS_ROOT`), which also
+needs Mercurius's own source to build the backbone; the backbone is not modified, so one loaded copy serves generation
+and decisions. The heads were trained on their default variants' features; 4-bit
 variants that were not trained on work with a small accuracy cost. The previous checkpoints (trained with share-alike data, including `opendecider-9b-stitched`) are in the
 git history before this release.
 
