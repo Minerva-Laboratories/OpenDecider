@@ -54,6 +54,7 @@ def main():
                     "tuned int8 GEMMs; without it every forward call expands the int8 weights again)")
     ap.add_argument("--chunk", type=int, default=0, help="prefill slices of this many tokens (all variants); 0 = one pass")
     ap.add_argument("--long-from", type=int, default=32768, help="lengths from here are timed once (no repeats)")
+    ap.add_argument("--no-exact", action="store_true", help="skip the exact baseline (already measured)")
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
     with gpu_lock("skipkv_bench"):
@@ -71,7 +72,7 @@ def main():
             if len(ids_all) >= max(a.lengths):
                 break
         res = {"ckpt": a.ckpt, "weights_gb": torch.cuda.memory_allocated() / GB, "variants": {}}
-        for v in ["exact"] + a.variants:
+        for v in ([] if a.no_exact else ["exact"]) + a.variants:
             maps = None
             if v != "exact":
                 m = re.match(r"(cut|mlp)(\d+)(?:_tail(\d+))?", v)

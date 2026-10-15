@@ -1692,8 +1692,42 @@ eager loader, no serving kernels):
   0.03 GB; the maps add 0.10 / 0.20 GB (Mercurius cut 24 / 16) and 0.25 / 0.50 GB (9B). A cache saving would need
   cross-layer sharing (SwiftKV's AcrossKV, trained) or recomputing upper caches from the cut's state; neither pays at
   these sizes (weights dominate: 2.3 GB / 8.6 GB).
-- The tail's measured cost there (+0.4 s Mercurius, +0.9 s 9B at any length) is the eager loader re-expanding int8
-  weights on every forward call, not the 32 tokens; serving-kernel timings and the scaling to 256k tokens follow.
+
+**On the serving kernels** (`--serving`: `decider.prepare_inference_`, tuned int8 GEMMs; same prompts):
+
+| | Mercurius-1-4B prompt 1k / 4k / 15k | 9B prompt 1k / 4k / 15k |
+|---|---|---|
+| exact | 0.98 / 3.58 / 16.3 s | 2.01 / 5.88 / 20.1 s |
+| cut 24 | 0.82 / 3.02 / 13.9 s (1.2x) | 1.60 / 4.67 / 16.1 s (1.25x) |
+| cut 16 | 0.67 / 2.45 / 11.4 s (1.45x) | 1.19 / 3.47 / 12.3 s (1.65x) |
+| cut 16 + tail 32 | 1.08 / 2.93 / 12.3 s | 1.56 / 3.88 / 12.7 s |
+| MLP-only cut 16 | 0.79 / 2.95 / 14.0 s (1.2x) | – |
+| MLP-only cut 16 + tail 32 | 1.21 / 3.43 / 14.6 s | – |
+
+The tail costs +0.35 to +0.95 s here too, so the earlier reading (an eager-loader artifact) was wrong: it is a second,
+short pass through every layer with its own fixed per-call cost. It eats most of cut 16's gain at 1k tokens and
+little at 15k. The MLP-only skip saves less than cut 24 (its mixers still run), so for cut 16 the attention-fitted
+maps + tail 32 are the better trade.
+
+**Scaling to long prompts** (serving kernels, 4,096-token prefill slices, one timing per length from 64k):
+
+| prompt tokens | 9B exact | 9B cut 24 | 9B cut 16 | Mercurius exact | Mercurius cut 24 | Mercurius cut 16 |
+|---|---|---|---|---|---|---|
+| 1,024 | 1.9 s | 1.25x | 1.69x | 1.0 s | 1.19x | 1.49x |
+| 4,096 | 5.6 s | 1.25x | 1.67x | 3.6 s | 1.18x | 1.46x |
+| 16,384 | 28.5 s | 1.26x | 1.69x | 17.7 s | 1.19x | 1.48x |
+| 65,536 | 180 s | 1.28x | 1.78x | 120 s | 1.24x | 1.65x |
+| 131,072 | 546 s | 1.31x | 1.86x | 391 s | 1.28x | 1.77x |
+| 262,144 (extrapolated) | ~1,840 s | ~1.35x | ~1.94x | ~1,400 s | ~1.31x | ~1.87x |
+
+- Exact time grows faster than the length (attention is quadratic): a quadratic fit to the 16k-131k points puts
+  0.69 (9B) / 0.79 (Mercurius) of the 131k time in the quadratic term. A cache-only layer skips its attention scores
+  too, so the speedup rises toward the share of full-attention layers skipped: both models have full attention at
+  layers 3, 7, ..., 31, so cut 16 skips 4 of 8 (limit 2x) and cut 24 skips 2 of 8 (limit 1.33x).
+- 262,144 tokens was not measured: the exact pass took free memory below the 12 GB guard and was stopped. The row is
+  the same quadratic fit, per arm.
+- Peak memory over the weights at 131k: 8.7 GB (9B; cache 4.0 GB) and 3.9 GB (Mercurius; cache 0.35 GB, 4-bit MLA
+  latents), the same for every arm.
 
 ## Sources for numbers not measured here
 
