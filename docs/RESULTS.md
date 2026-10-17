@@ -1729,6 +1729,50 @@ maps + tail 32 are the better trade.
 - Peak memory over the weights at 131k: 8.7 GB (9B; cache 4.0 GB) and 3.9 GB (Mercurius; cache 0.35 GB, 4-bit MLA
   latents), the same for every arm.
 
+### 21.4 Per-token depth and partial-layer skips (2026-10-16/17)
+
+`scripts/skipkv_depth.py` (`src/opendecider/skipdepth.py`, `src/opendecider/skipparts.py`), same tests as 21.3
+(generation KL / loss Δ on FineWeb-Edu, 30 docs; OpenBookQA / CommonsenseQA 300 (4B) / 200 (9B) items; prompt-pass time
+in seconds on the serving loader, eager attention). Two new forms:
+- **graded depth** (`g256` / `g512`): segments of the prompt get different cuts in one pass: the last 32 tokens run
+  every layer, the previous 224 / 480 are cut at 24, the rest at 16 (no second call, unlike the exact tail);
+- **part skips** (`mlp16`, `attn16`, `mlpattn16`, and at 24): above the cut only the MLPs, only the full-attention
+  mixers, or both are replaced by ridge maps; DeltaNet mixers always run. An attention-skipped layer still writes its
+  cache from the true normed input (K/V, or Mercurius latents) but computes no queries or scores.
+
+| arm | 4B KL | 4B OBQA / CSQA | 4B time 15k / 32k | 9B KL | 9B OBQA / CSQA | 9B time 15k / 32k |
+|---|---|---|---|---|---|---|
+| exact | 0 | 0.797 / 0.723 | 16.5 / 41.9 | 0 | 0.885 / 0.815 | 21.5 / 47.0 |
+| cut 24 | 0.0084 | 0.813 / 0.773 | 13.9 / 34.8 | 0.0058 | 0.900 / 0.820 | 17.2 / 37.7 |
+| cut 16 | 0.085 | 0.403 / 0.283 | 11.2 / 27.4 | 0.094 | 0.315 / 0.200 | 13.0 / 28.3 |
+| cut 16 + tail 32 | 0.068 | 0.710 / 0.630 | 11.8 / 28.3 | 0.075 | 0.835 / 0.775 | 14.0 / 29.4 |
+| g256 | 0.036 | 0.800 / 0.717 | 12.3 / – | 0.039 | 0.890 / 0.815 | 14.8 / – |
+| g512 | 0.023 | 0.800 / 0.717 | 12.3 / – | 0.024 | 0.890 / 0.815 | 15.0 / – |
+| MLP-only 16 | 0.050 | 0.437 / 0.257 | 14.1 / 36.8 | 0.046 | 0.795 / 0.755 | 15.8 / 35.5 |
+| attention-only 16 | 0.0047 | 0.807 / 0.743 | 14.6 / 34.5 | 0.0025 | 0.840 / 0.780 | 20.6 / 44.4 |
+| attention-only 16 + tail 32 | 0.0050 | 0.790 / 0.703 | 15.2 / 35.5 | 0.0021 | 0.890 / 0.815 | 21.6 / 45.6 |
+| MLP + attention 16 | 0.053 | 0.450 / 0.257 | 12.2 / 29.5 | 0.052 | 0.765 / 0.695 | 14.9 / 32.6 |
+| MLP-only 24 | 0.0068 | 0.793 / 0.740 | 15.3 / 39.3 | 0.0045 | 0.890 / 0.815 | 18.6 / 41.4 |
+| attention-only 24 | 0.0015 | 0.810 / 0.740 | 15.5 / 38.3 | 0.0007 | 0.890 / 0.815 | 21.0 / 45.8 |
+
+(g256 / g512 were timed in the depth run only, to 15k.)
+- **g512 is the cut-16 setting to use**: about a quarter of cut 16's generation KL, multiple choice at the exact
+  model's accuracy on both models, and 1.33x (4B) / 1.43x (9B) faster than exact at 15k. Its cost over plain cut 16
+  is the 512 recent tokens through more layers, not a second call.
+- **Selecting extra tokens by the error-model score** (9B: last 32 + 5% / 10% of tokens by score) is no better than
+  the same number of most recent tokens (`d_tail83`, KL 0.058 vs 0.059 for `d_sel5`); on top of g512, 5% by score
+  moves KL 0.024 -> 0.022. Recency carries nearly all of it.
+- **Attention-only skip** is nearly free in quality (KL 0.0025-0.005, within cut 24's) and saves 4-18% at 15k-32k (more on the 4B):
+  it removes the prompt's O(T^2) attention in the upper half of the full-attention layers. Its gain grows with
+  length; at 1k it saves little. **MLP-only skip** halves cut 16's KL but keeps most of its cost; on the 9B it
+  keeps multiple choice much better than on the 4B (0.795 vs 0.437 OBQA).
+
+**Where the exact tail's cost goes** (`scripts/skipkv_overhead.py`, torch.profiler, 32-token tail on a 1k / 4k
+prompt): the tail is a second forward call through every layer and costs about one decode step (4B 0.43-0.51 s vs a
+0.41-0.46 s step; 9B 0.95-0.97 s vs 0.93 s). On the 9B, the 24 DeltaNet layers take 0.72 s of it, the 8 attention
+layers 0.23-0.25 s, everything outside the layers under 10 ms. So the tail is not overhead that a fused kernel would
+remove: it is the per-call cost of the recurrent layers, which g512 avoids by staying inside one pass.
+
 ## Sources for numbers not measured here
 
 Retrieved 2026-09-23. All are reported by their authors or by third parties and were not reproduced.
