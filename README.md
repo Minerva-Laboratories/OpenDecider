@@ -242,8 +242,9 @@ One fresh process per configuration, eager kernels. Accuracy on 500 typed-decisi
   long states (its prefill on the Orin is ~470 tokens/s against ~770); see `docs/RESULTS.md` §20.
 - Skipped state pass (SwiftKV-style, no training; `docs/RESULTS.md` §21): state tokens run layers 1-16, the layers
   above write only their cache from closed-form ridge maps (`scripts/skipkv_serve.py` fits them). The state pass is
-  1.6x faster; the public sets give the same answers, typed decisions 94% the same. For decisions only: on free text
-  generation (Mercurius-1-4B) the same retrofit changes outputs (§21.2).
+  1.6x faster; the public sets give the same answers, typed decisions 94% the same. The method lives in its own
+  package, Terrace (graded per-token depth and part skips too; `pip install opendecider[terrace]`); on free text
+  generation plain cut 16 changes outputs, its graded form keeps them close (§21.2-21.4 and Terrace's README).
 - A 9B in 4 bits works when the head is fitted to it: `opendecider-9b-awq` is the 2B head stitched onto the AWQ
   weights (no 9B training). It matches the int8 stitched model on the public benchmarks (`docs/RESULTS.md` §13.6),
   is 1 to 2 points below the trained 9B on knowledge-heavy multiple choice, and weaker at flagging questions about
@@ -515,7 +516,7 @@ Environment variables:
 | `OPENDECIDER_STATE_CACHE_MB` | `2048` | Prefix cache size. `0` turns it off. |
 | `OPENDECIDER_NONE_TEXT` | `none of the above` | Text of the `none` option. Empty turns it off. |
 | `OPENDECIDER_LLAMACPP_GGUF` | – | Run the backbone in llama.cpp from this GGUF (the 9B; build `deploy/llamacpp/build.sh` first). Same as `serve --llamacpp-gguf`. |
-| `OPENDECIDER_SKIPKV` | – | Maps file (`scripts/skipkv_serve.py`): state passes skip the layers above its cut (cache only). Opt-in. |
+| `OPENDECIDER_SKIPKV` | – | Maps file (`scripts/skipkv_serve.py`, or Terrace's `fit_skip_maps`): state passes skip the layers above its cut (cache only). Opt-in; needs the `terrace` extra. |
 | `OPENDECIDER_VERA` | `auto` | VeRA adapters below bf16 resolution are left out at serving; `1` keeps them, `0` always drops them. |
 | `HOST`, `PORT` | `127.0.0.1`, `8000` | Bind address. |
 

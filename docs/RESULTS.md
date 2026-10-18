@@ -1536,10 +1536,11 @@ still need their K/V, or k/v/a/b projections, conv and recurrence; they skip q, 
 
 ### 21.1 The skipped state pass for real (cut 16, 9B)
 
-`src/opendecider/skipkv.py`: during state passes, every layer from the cut up is replaced by a cache-only layer that
-writes its cache from the predicted input and runs nothing else for state tokens: k_proj, v_proj, k_norm and RoPE in
-the full-attention layers (no queries, attention or output projection), in_proj_qkv / a / b, conv and the delta-rule
-state in the DeltaNet layers (no z, gated norm or output projection), no MLP. Rows run every layer as before. Unit
+`terrace.maps` (Terrace; formerly `src/opendecider/skipkv.py`): during state passes, every layer from the cut up is
+replaced by a cache-only layer that writes its cache from the predicted input and runs nothing else for state tokens:
+k_proj, v_proj, k_norm and RoPE in the full-attention layers (no queries, attention or output projection),
+in_proj_qkv / a / b, conv and the delta-rule state in the DeltaNet layers (no z, gated norm or output projection), no
+MLP. Rows run every layer as before. Unit
 tests: with the exact input predicted, the cache equals the full layers' (whole pass and continuation chunks, both
 layer types). Serving opt-in: `OPENDECIDER_SKIPKV=<maps file>` (fit with `scripts/skipkv_serve.py`).
 
@@ -1560,218 +1561,37 @@ folded into them). `scripts/skipkv_serve.py`, serving path (load_decider), Jetso
   accuracy within noise. The maps cost 0.5 GB (16 x 4096^2 bf16).
 - Normed maps are the default (equal speed, slightly closer to exact, foldable).
 
-### 21.2 The same skip for ordinary text generation (Mercurius-1-4B)
+### 21.2-21.4 The skip as a general prompt-pass method: moved to Terrace (2026-10-12 to 2026-10-17)
 
-Does the retrofit help a plain LLM workload? As in SwiftKV, prompt tokens run layers 0..cut-1 and the layers above
-write only their cache; the last prompt token and every generated token run all layers, so only time to first token
-changes. Mercurius's own mixers got cache-only paths too (MLA: only its TurboQuant latent / RoPE-key codes; GDN-2: up
-to the state update, no z / gated norm / output projection); `scripts/skipkv_check_exact.py` checks every path with
-the exact input predicted: the cache is bit-identical (Mercurius MLA + GDN-2 and the 9B's stock layers). Maps (normed)
-fitted on 200 FineWeb-Edu documents (first 256 tokens each, 48k tokens; ODC-BY local sample), evaluated on 60 other
-documents: a 1,024-token prompt, the next 128 tokens scored by teacher forcing, and a 32-token greedy continuation.
-`scripts/skipkv_lm.py`, Jetson AGX Orin 50 W:
+The skip itself (maps, cache-only layers, graded per-token depth, part skips) and its LLM-side measurements now live
+in **Terrace**, a separate package that this repo imports for `OPENDECIDER_SKIPKV` (`pip install opendecider[terrace]`).
+Its README holds the tables, scripts (`experiments/`) and raw results; the runs used this repo's checkpoints as
+backbones (`--ckpt`). Headline numbers (Mercurius-1-4B / the 9B; KL(exact || skipped) of the next-token distribution
+on FineWeb-Edu continuations; OpenBookQA / CommonsenseQA accuracy, lettered, chat template):
 
-| Mercurius-1-4B (32 layers) | Prompt pass, 1k / 4k tokens | Continuation NLL (Δ, 95% CI) | KL(exact ‖ skipped) | Same top-1 token | Greedy 32 tokens identical (first difference, mean) |
+| prompt pass | 4B KL | 4B OBQA / CSQA | 9B KL | 9B OBQA / CSQA | 9B time at 15k / 32k |
 |---|---|---|---|---|---|
-| exact | 0.97 / 3.59 s | 2.364 | – | – | – |
-| cut 24 | 0.84 / 3.04 s (1.15x / 1.18x) | +0.005 (+0.002, +0.008) | 0.009 | 96.4% | 28% (token 17) |
-| cut 16 | 0.70 / 2.50 s (1.38x / 1.43x) | +0.085 (+0.068, +0.103) | 0.091 | 89.3% | 0% (token 4) |
+| exact | 0 | 0.797 / 0.723 | 0 | 0.885 / 0.815 | 21.5 / 47.0 s |
+| cut 24 | 0.0084 | 0.813 / 0.773 | 0.0058 | 0.900 / 0.820 | 17.2 / 37.7 s |
+| cut 16 | 0.085 | 0.403 / 0.283 | 0.094 | 0.315 / 0.200 | 13.0 / 28.3 s |
+| cut 16 + exact last 32 tokens (second call) | 0.068 | 0.710 / 0.630 | 0.075 | 0.835 / 0.775 | 14.0 / 29.4 s |
+| g512: last 32 all layers, 480 cut 24, rest cut 16 (one pass) | 0.023 | 0.800 / 0.717 | 0.024 | 0.890 / 0.815 | 15.0 / – s |
+| attention-only skip from 16 (+ last 32 exact) | 0.0047 (0.0050) | 0.807 / 0.743 | 0.0025 (0.0021) | 0.840 / 0.780 (0.890 / 0.815) | 20.6 / 44.4 s |
 
-(Quality from the run with whole mixers above the cut; the cache-only paths write the same cache, timing from a
-second run with them. Whole mixers above the cut: 0.91 / 3.27 s at cut 24, 0.81 / 2.96 s at cut 16.)
-
-- It does not carry over. Decisions read the state through a softmax over a few options and tolerate the drift (9B:
-  public sets unchanged); free generation compounds it: at cut 24, where the next-token loss rises only 0.2%,
-  greedy outputs already differ from the exact model's within 32 tokens in 72% of documents. Cut 16 is clearly worse.
-- The gain is also smaller: only the prompt pass changes, Mercurius's upper layers are cheaper relative to its MLP
-  than the 9B's, and decoding is unchanged.
-- SwiftKV itself trains the upper layers' k/v projections by distillation from the unchanged model for this reason;
-  the closed-form retrofit alone is not enough for generation. Not enabled for generation (diagnosis below).
-
-**Why: not MLA, attention caches in general (2026-10-13).** Same test (30 documents, maps fitted on FineWeb-Edu for
-each model), with chosen caches taken from an exact pass instead of the maps (`--mix`):
-
-| | Loss Δ | KL | Same top-1 | Greedy 32 identical |
-|---|---|---|---|---|
-| Mercurius, exact vs itself (prompt pass in 256-token slices: same math, other rounding) | 0.000 | 0.0040 | 96.3% | 53% |
-| Mercurius cut 24 | +0.008 | 0.0084 | 96.3% | 27% |
-| Mercurius cut 24, attention (MLA) caches exact | +0.003 | 0.0030 | 97.9% | 57% |
-| Mercurius cut 24, DeltaNet caches exact | +0.003 | 0.0057 | 96.7% | 40% |
-| 9B (stock Qwen3.5) cut 24 | +0.006 | 0.0058 | 96.5% | 27% |
-| 9B cut 24, attention caches exact | +0.002 | 0.0019 | 98.3% | 50% |
-| Mercurius cut 16 | +0.082 | 0.085 | 89.1% | 0% |
-| Mercurius cut 16, attention (MLA) caches exact | +0.011 | 0.016 | 94.5% | 17% |
-| Mercurius cut 16, DeltaNet caches exact | +0.047 | 0.048 | 91.7% | 7% |
-| 9B cut 16 | +0.085 | 0.094 | 89.2% | 0% |
-| 9B cut 16, attention caches exact | +0.010 | 0.016 | 94.7% | 17% |
-
-- The stock 9B degrades exactly like Mercurius: the cause is generation, not MLA. In both, the few full-attention
-  layers' predicted caches carry most of the error (4 attention layers against 12 DeltaNet layers above cut 16), and
-  the Mercurius code path is exact (bit-identical caches with the true input, §21.2 check).
-- Within Mercurius's MLA cache (cut 16, one part exact at a time): RoPE key exact KL 0.084 (no change), latent exact
-  0.056, per-group key scale exact 0.125 (worse: it no longer matches the predicted latent). The error is in the
-  latent (key and value content) with its own scale, not in the decoupled RoPE key.
-- Cut 24 is near the model's own rounding noise: top-1 agreement equals the exact model against itself (96.3%), KL
-  2x, greedy identity 27% against 53%. Mercurius (4-bit weights and cache) is greedy-identical to itself only half the
-  time under a different prompt chunking, so greedy identity overstates the damage. Cut 16 is 20x the floor.
-- Calibration does not remove it: the best single temperature is 1.0 (no systematic over/under-confidence), and a
-  ridge map on the final hidden state (full D x D or per dimension, can reorder tokens; fitted on 50 separate
-  documents, strength by held-out KL) makes held-out KL slightly worse (cut 24: 0.0088 -> 0.0096; cut 16: 0.070 ->
-  0.072). The error depends on what the predicted attention caches lose for each context, not on a fixed distortion.
-- Decisions on Mercurius (`scripts/skipkv_serve.py`, its trained decision head): cut 24 typed 97.6% / Banking77
-  100% / injections 99.1% the same answers, accuracy unchanged, state pass 1.18x faster at 15k tokens; cut 16 94.4% /
-  100% / 99.1%, 1.46x faster. As on the 9B, decisions tolerate it.
-
-**Real LLM use, calibration, mitigations (Mercurius-1-4B, 2026-10-13/14).** `scripts/skipkv_tasks.py` (chat template,
-thinking off; answer flips against the exact arm; floor = the exact model with its prompt pass in 32-token slices),
-`scripts/skipkv_calib.py` (option-logit calibrators fitted on half the items, reported on the other half),
-`scripts/skipkv_rankcal.py` (ODIR over the top-16 next-token candidates).
-
-| Task (300 items) | exact | floor (flips) | cut 24 (flips) | cut 16 (flips) | cut 16, last 32 prompt tokens exact (flips) |
-|---|---|---|---|---|---|
-| OpenBookQA | 0.797 | 0.803 (2.3%) | 0.813 (6.0%) | 0.403 (63%) | 0.710 (14.3%) |
-| CommonsenseQA | 0.723 | 0.713 (4.3%) | 0.773 (12.7%) | 0.283 (80%) | 0.630 (19.0%) |
-| PubMedQA (yes/no over an abstract) | 0.830 | 0.833 (2.3%) | 0.830 (2.0%) | 0.820 (5.7%) | – |
-
-- Cut 24 costs no accuracy on any task. Its extra answer changes are miscalibration: vector scaling or ODIR fitted to
-  match the exact model on half the items halves them on the other half (CommonsenseQA 12.7% -> 6.3%, floor 4.3%;
-  OpenBookQA 6.0% -> 4.3-4.7%, floor 2.3%).
-- Cut 16 collapses on lettered multiple choice (it picks early letters: A 58%, B 33%, C 3%, D 6% on OpenBookQA) but not
-  on PubMedQA. Calibration recovers only part (CommonsenseQA 0.28 -> 0.40 with ODIR): information is lost, mostly for
-  the last prompt tokens. Running the last 32 prompt tokens through every layer restores most of it (0.40 -> 0.71,
-  0.28 -> 0.63).
-- Next-token generation (60 documents, ODIR over the top-16 candidates fitted on 40, tested on 20): no change at any
-  cut (cut 24 top-1 agreement 95.9% raw / 95.8% ODIR, floor 96.6%; gold-token accuracy 0.513 against exact 0.511).
-  There is nothing systematic to calibrate in free generation; cut 24 also loses no next-token accuracy.
-- Mitigations on the generation test (KL, 30 documents): cut 16 0.085; last 32 prompt tokens exact 0.068; last 128
-  exact 0.043; maps with causal EMA context features (alphas 0.9, 0.99; `fit_skip_maps(alphas=...)`) 0.079; both
-  0.063. Cut 24 is unchanged by either (0.0082-0.0094; floor 0.0040). The exact tail (`SkipMaps.tail`) is the useful
-  mitigation; EMA context features barely help.
-- GSM8K (20 problems, 200-token cap, greedy) was not informative: replies were cut at the cap (exact 5% accuracy),
-  and final answers changed in 55% (floor) and 50% (cut 24) of problems alike.
-
-### 21.3 Cut-16 fixes and what the skip saves (2026-10-14)
-
-Three fixes for cut 16, all keeping the backbone frozen (Mercurius-1-4B, same tests as 21.2):
-- **exact tail** (`SkipMaps.tail` / `MLPSurrogates.tail`): the last R prompt tokens run every layer on top of the
-  skipped cache;
-- **attention-fitted maps** (`scripts/skipkv_attnfit.py`): each attention layer's map fine-tuned (Adam, 400 steps,
-  L2 pull to the closed-form map) so later tokens' queries get the same attention output from the predicted prompt
-  keys / values as from the exact ones (targets from the model's own exact pass, MLA through its float path). Held-out
-  relative attention error per layer: 0.024 -> 0.023, 0.054 -> 0.042, 0.024 -> 0.020, 0.0031 -> 0.0024;
-- **MLP-only skip** (`skipkv.MLPSurrogates`, `fit_mlp_surrogates`): layers from the cut keep their attention and
-  DeltaNet mixers, run on the propagated stream (context mixing stays real); only each MLP is replaced by a ridge map
-  from its input to its output.
-
-| cut 16 variant | Generation KL (30 docs) | Loss Δ | OpenBookQA (exact 0.797) | CommonsenseQA (exact 0.723) |
-|---|---|---|---|---|
-| closed-form maps | 0.085 | +0.082 | 0.403 | 0.283 |
-| + exact tail 32 | 0.068 | +0.075 | 0.710 | 0.630 |
-| + exact tail 128 | 0.043 | +0.052 | – | – |
-| attention-fitted maps | 0.078 | +0.076 | 0.407 | 0.283 |
-| attention-fitted + tail 32 | 0.062 | +0.069 | 0.723 | 0.640 |
-| MLP-only skip | 0.050 | +0.051 | 0.437 | 0.257 |
-| MLP-only skip + tail 32 | 0.042 | +0.047 | 0.723 | 0.623 |
-
-(noise floor: generation KL 0.004; OpenBookQA 0.803, CommonsenseQA 0.713.) The exact tail is what restores lettered
-multiple choice; the attention fit and the MLP-only skip lower the generation KL (MLP-only + tail is the best, about
-half of cut 16's) but leave the multiple-choice accuracy where the tail alone puts it. None brings cut 16 near cut 24
-(KL 0.008); for generation, cut 24 remains the setting that keeps outputs within the model's own noise.
-
-**Time and memory** (`scripts/skipkv_bench.py`, prompt pass and time to first token, median of 3, FineWeb-Edu text;
-eager loader, no serving kernels):
-
-| | Mercurius-1-4B prompt 1k / 4k / 15k | 9B prompt 1k / 4k / 15k |
-|---|---|---|
-| exact | 1.01 / 3.71 / 16.6 s | 2.17 / 5.90 / 21.2 s |
-| cut 24 | 0.85 / 3.14 / 13.9 s (1.2x) | 1.71 / 4.63 / 17.1 s (1.25x) |
-| cut 16 | 0.68 / 2.53 / 10.8 s (1.5x) | 1.26 / 3.46 / 12.8 s (1.65x) |
-
-- Memory: no saving. Every layer keeps its cache (later tokens read it), so the KV / state cache is the same size
-  (Mercurius 0.05 / 0.08 GB at 1k / 15k tokens, 4-bit latents; 9B 0.08 / 0.51 GB) and peak memory is unchanged within
-  0.03 GB; the maps add 0.10 / 0.20 GB (Mercurius cut 24 / 16) and 0.25 / 0.50 GB (9B). A cache saving would need
-  cross-layer sharing (SwiftKV's AcrossKV, trained) or recomputing upper caches from the cut's state; neither pays at
-  these sizes (weights dominate: 2.3 GB / 8.6 GB).
-
-**On the serving kernels** (`--serving`: `decider.prepare_inference_`, tuned int8 GEMMs; same prompts):
-
-| | Mercurius-1-4B prompt 1k / 4k / 15k | 9B prompt 1k / 4k / 15k |
-|---|---|---|
-| exact | 0.98 / 3.58 / 16.3 s | 2.01 / 5.88 / 20.1 s |
-| cut 24 | 0.82 / 3.02 / 13.9 s (1.2x) | 1.60 / 4.67 / 16.1 s (1.25x) |
-| cut 16 | 0.67 / 2.45 / 11.4 s (1.45x) | 1.19 / 3.47 / 12.3 s (1.65x) |
-| cut 16 + tail 32 | 1.08 / 2.93 / 12.3 s | 1.56 / 3.88 / 12.7 s |
-| MLP-only cut 16 | 0.79 / 2.95 / 14.0 s (1.2x) | – |
-| MLP-only cut 16 + tail 32 | 1.21 / 3.43 / 14.6 s | – |
-
-The tail costs +0.35 to +0.95 s here too, so the earlier reading (an eager-loader artifact) was wrong: it is a second,
-short pass through every layer with its own fixed per-call cost. It eats most of cut 16's gain at 1k tokens and
-little at 15k. The MLP-only skip saves less than cut 24 (its mixers still run), so for cut 16 the attention-fitted
-maps + tail 32 are the better trade.
-
-**Scaling to long prompts** (serving kernels, 4,096-token prefill slices, one timing per length from 64k):
-
-| prompt tokens | 9B exact | 9B cut 24 | 9B cut 16 | Mercurius exact | Mercurius cut 24 | Mercurius cut 16 |
-|---|---|---|---|---|---|---|
-| 1,024 | 1.9 s | 1.25x | 1.69x | 1.0 s | 1.19x | 1.49x |
-| 4,096 | 5.6 s | 1.25x | 1.67x | 3.6 s | 1.18x | 1.46x |
-| 16,384 | 28.5 s | 1.26x | 1.69x | 17.7 s | 1.19x | 1.48x |
-| 65,536 | 180 s | 1.28x | 1.78x | 120 s | 1.24x | 1.65x |
-| 131,072 | 546 s | 1.31x | 1.86x | 391 s | 1.28x | 1.77x |
-| 262,144 (extrapolated) | ~1,840 s | ~1.35x | ~1.94x | ~1,400 s | ~1.31x | ~1.87x |
-
-- Exact time grows faster than the length (attention is quadratic): a quadratic fit to the 16k-131k points puts
-  0.69 (9B) / 0.79 (Mercurius) of the 131k time in the quadratic term. A cache-only layer skips its attention scores
-  too, so the speedup rises toward the share of full-attention layers skipped: both models have full attention at
-  layers 3, 7, ..., 31, so cut 16 skips 4 of 8 (limit 2x) and cut 24 skips 2 of 8 (limit 1.33x).
-- 262,144 tokens was not measured: the exact pass took free memory below the 12 GB guard and was stopped. The row is
-  the same quadratic fit, per arm.
-- Peak memory over the weights at 131k: 8.7 GB (9B; cache 4.0 GB) and 3.9 GB (Mercurius; cache 0.35 GB, 4-bit MLA
-  latents), the same for every arm.
-
-### 21.4 Per-token depth and partial-layer skips (2026-10-16/17)
-
-`scripts/skipkv_depth.py` (`src/opendecider/skipdepth.py`, `src/opendecider/skipparts.py`), same tests as 21.3
-(generation KL / loss Δ on FineWeb-Edu, 30 docs; OpenBookQA / CommonsenseQA 300 (4B) / 200 (9B) items; prompt-pass time
-in seconds on the serving loader, eager attention). Two new forms:
-- **graded depth** (`g256` / `g512`): segments of the prompt get different cuts in one pass: the last 32 tokens run
-  every layer, the previous 224 / 480 are cut at 24, the rest at 16 (no second call, unlike the exact tail);
-- **part skips** (`mlp16`, `attn16`, `mlpattn16`, and at 24): above the cut only the MLPs, only the full-attention
-  mixers, or both are replaced by ridge maps; DeltaNet mixers always run. An attention-skipped layer still writes its
-  cache from the true normed input (K/V, or Mercurius latents) but computes no queries or scores.
-
-| arm | 4B KL | 4B OBQA / CSQA | 4B time 15k / 32k | 9B KL | 9B OBQA / CSQA | 9B time 15k / 32k |
-|---|---|---|---|---|---|---|
-| exact | 0 | 0.797 / 0.723 | 16.5 / 41.9 | 0 | 0.885 / 0.815 | 21.5 / 47.0 |
-| cut 24 | 0.0084 | 0.813 / 0.773 | 13.9 / 34.8 | 0.0058 | 0.900 / 0.820 | 17.2 / 37.7 |
-| cut 16 | 0.085 | 0.403 / 0.283 | 11.2 / 27.4 | 0.094 | 0.315 / 0.200 | 13.0 / 28.3 |
-| cut 16 + tail 32 | 0.068 | 0.710 / 0.630 | 11.8 / 28.3 | 0.075 | 0.835 / 0.775 | 14.0 / 29.4 |
-| g256 | 0.036 | 0.800 / 0.717 | 12.3 / – | 0.039 | 0.890 / 0.815 | 14.8 / – |
-| g512 | 0.023 | 0.800 / 0.717 | 12.3 / – | 0.024 | 0.890 / 0.815 | 15.0 / – |
-| MLP-only 16 | 0.050 | 0.437 / 0.257 | 14.1 / 36.8 | 0.046 | 0.795 / 0.755 | 15.8 / 35.5 |
-| attention-only 16 | 0.0047 | 0.807 / 0.743 | 14.6 / 34.5 | 0.0025 | 0.840 / 0.780 | 20.6 / 44.4 |
-| attention-only 16 + tail 32 | 0.0050 | 0.790 / 0.703 | 15.2 / 35.5 | 0.0021 | 0.890 / 0.815 | 21.6 / 45.6 |
-| MLP + attention 16 | 0.053 | 0.450 / 0.257 | 12.2 / 29.5 | 0.052 | 0.765 / 0.695 | 14.9 / 32.6 |
-| MLP-only 24 | 0.0068 | 0.793 / 0.740 | 15.3 / 39.3 | 0.0045 | 0.890 / 0.815 | 18.6 / 41.4 |
-| attention-only 24 | 0.0015 | 0.810 / 0.740 | 15.5 / 38.3 | 0.0007 | 0.890 / 0.815 | 21.0 / 45.8 |
-
-(g256 / g512 were timed in the depth run only, to 15k.)
-- **g512 is the cut-16 setting to use**: about a quarter of cut 16's generation KL, multiple choice at the exact
-  model's accuracy on both models, and 1.33x (4B) / 1.43x (9B) faster than exact at 15k. Its cost over plain cut 16
-  is the 512 recent tokens through more layers, not a second call.
-- **Selecting extra tokens by the error-model score** (9B: last 32 + 5% / 10% of tokens by score) is no better than
-  the same number of most recent tokens (`d_tail83`, KL 0.058 vs 0.059 for `d_sel5`); on top of g512, 5% by score
-  moves KL 0.024 -> 0.022. Recency carries nearly all of it.
-- **Attention-only skip** is nearly free in quality (KL 0.0025-0.005, within cut 24's) and saves 4-18% at 15k-32k (more on the 4B):
-  it removes the prompt's O(T^2) attention in the upper half of the full-attention layers. Its gain grows with
-  length; at 1k it saves little. **MLP-only skip** halves cut 16's KL but keeps most of its cost; on the 9B it
-  keeps multiple choice much better than on the 4B (0.795 vs 0.437 OBQA).
-
-**Where the exact tail's cost goes** (`scripts/skipkv_overhead.py`, torch.profiler, 32-token tail on a 1k / 4k
-prompt): the tail is a second forward call through every layer and costs about one decode step (4B 0.43-0.51 s vs a
-0.41-0.46 s step; 9B 0.95-0.97 s vs 0.93 s). On the 9B, the 24 DeltaNet layers take 0.72 s of it, the 8 attention
-layers 0.23-0.25 s, everything outside the layers under 10 ms. So the tail is not overhead that a fused kernel would
-remove: it is the per-call cost of the recurrent layers, which g512 avoids by staying inside one pass.
+- Cut 24 stays within the model's own rounding noise for generation (4B floor KL 0.0040) and loses no task accuracy;
+  plain cut 16 is for decisions only (21, 21.1), not for generation or lettered multiple choice.
+- The few full-attention layers' predicted caches carry most of the error, on stock attention and MLA alike; the most
+  recent prompt tokens matter most, so graded depth (g512) recovers exact accuracy in one pass, about 1.4x faster than
+  exact at 15k on the 9B. Error-score token selection does not beat recency.
+- Scaling (serving kernels): the 9B prompt pass at 131k tokens is 1.31x (cut 24) / 1.86x (cut 16) faster than exact
+  (546 s). The exact tail costs about one decode step (the DeltaNet layers' per-call cost), which graded depth avoids.
+- Memory: unchanged (every layer keeps its cache); the maps add 0.25 / 0.50 GB on the 9B (cut 24 / 16).
+- Decisions on Mercurius-1-4B (`scripts/skipkv_serve.py`, its trained decision head): cut 24 gives 97.6% / 100% /
+  99.1% the same answers on typed decisions / Banking77 / injections, accuracy unchanged, state pass 1.18x faster at
+  15k tokens; cut 16 94.4% / 100% / 99.1%, 1.46x faster. As on the 9B (21.1), decisions tolerate the skip.
+- Calibration (`scripts/skipkv_calib.py`, `scripts/skipkv_rankcal.py`, on Terrace's saved logits): option-logit
+  vector scaling or ODIR halves cut 24's extra multiple-choice answer changes (CommonsenseQA 12.7% -> 6.3%, floor
+  4.3%); ODIR over the top-16 next-token candidates changes nothing in free generation, and no temperature helps.
 
 ## Sources for numbers not measured here
 

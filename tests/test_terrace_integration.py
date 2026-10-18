@@ -1,10 +1,14 @@
-"""skipkv: the cache-only upper layers write the same cache as the full layers when the predicted input is exact."""
+"""Terrace (the skipped state pass, an optional dependency) on OpenDecider's Backbone: the cache-only upper layers write
+the same cache as the full layers when the predicted input is exact, through Backbone.prefix_cache_batch / prefill (the
+OPENDECIDER_SKIPKV path) and Terrace's segment / depth / part-skip forms. Skipped when terrace is not installed."""
 import pytest
 import torch
 
-from opendecider.batching import state_texts
-from opendecider.skipkv import SkipMaps, fit_skip_maps, skipped_share
-from tiny import tiny_backbone
+pytest.importorskip("terrace")
+
+from opendecider.batching import state_texts  # noqa: E402
+from terrace import SkipMaps, fit_skip_maps, skipped_share  # noqa: E402
+from tiny import tiny_backbone  # noqa: E402
 
 
 def _passthrough_above(bb, cut):
@@ -69,7 +73,7 @@ def test_generic_mixer_path_matches():
 
 
 def test_ema_scan_matches_loop():
-    from opendecider.skipkv import ema_scan
+    from terrace.maps import ema_scan
     x = torch.randn(2, 300, 4)
     y, c = ema_scan(x, 0.9, block=64)
     ref, prev = torch.zeros_like(x), torch.zeros(2, 4)
@@ -113,7 +117,7 @@ def test_fit_with_context_features():
 @pytest.mark.parametrize("tail", [0, 4])
 def test_mlp_surrogates_exact_when_mlp_is_linear(tail):
     """Upper MLPs that output zero (down_proj zeroed): the zero surrogate is exact, mixers run as before."""
-    from opendecider.skipkv import MLPSurrogates, fit_mlp_surrogates
+    from terrace.maps import MLPSurrogates, fit_mlp_surrogates
     bb = tiny_backbone(kv_quant="none")
     for layer in bb.lm.layers[3:]:
         layer.mlp.down_proj.weight.data.zero_()
@@ -134,7 +138,7 @@ def test_mlp_surrogates_exact_when_mlp_is_linear(tail):
 
 
 def test_seg_lengths_head_and_tail_windows():
-    from opendecider.skipdepth import seg_lengths
+    from terrace.depth import seg_lengths
     m = object()
     assert seg_lengths(1000, [(-1, m), (480, m), (32, None)]) == [488, 480, 32]
     assert seg_lengths(1000, [(64, None), (-1, m), (480, m), (32, None)]) == [64, 424, 480, 32]
@@ -157,7 +161,7 @@ def _cache_tensors(cache):
 
 def test_segment_cache_matches_per_token_depth():
     """Recency plans: the fast segment form writes the cache of the per-token-depth reference (depth_cache)."""
-    from opendecider.skipdepth import DepthPlan, depth_cache, segment_cache
+    from terrace.depth import DepthPlan, depth_cache, segment_cache
     bb = tiny_backbone(kv_quant="none")
     D, L = bb.hidden_size, len(bb.lm.layers)
     g = torch.Generator().manual_seed(1)
@@ -178,8 +182,8 @@ def test_segment_cache_matches_per_token_depth():
 def test_part_skip_exact_when_parts_are_zero(mlp, attn):
     """Upper MLPs and attention outputs zeroed: zero surrogates are exact, and the skipped attention still writes its
     cache from the true input, so every cache tensor equals the exact pass's."""
-    from opendecider.skipdepth import segment_cache
-    from opendecider.skipparts import PartSkip
+    from terrace.depth import segment_cache
+    from terrace.parts import PartSkip
     bb = tiny_backbone(kv_quant="none")
     _passthrough_above(bb, 4)
     D, L = bb.hidden_size, len(bb.lm.layers)
