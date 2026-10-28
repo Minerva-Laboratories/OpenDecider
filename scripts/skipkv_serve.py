@@ -1,4 +1,4 @@
-"""The skipped state pass for real (Terrace skip maps, terrace.SkipMaps): fit the maps, then accuracy against the exact path and
+"""The skipped state pass for real (DepthSkip skip maps, depthskip.SkipMaps): fit the maps, then accuracy against the exact path and
 wall-clock latency, on the serving path load_decider installs.
 
 Per mode (input: the probe's maps + each layer's own input norm; normed: straight to the normed input) the maps are
@@ -25,7 +25,7 @@ from eval.typed_decisions import load_cases  # noqa: E402
 from opendecider.checkpoint import load_decider  # noqa: E402
 from opendecider.formatting import record_state_text  # noqa: E402
 from opendecider.guards import gpu_lock  # noqa: E402
-from terrace import SkipMaps, fit_skip_maps, skipped_share  # noqa: E402
+from depthskip import SkipMaps, fit_skip_maps, skipped_share  # noqa: E402
 from skipkv_probe import evaluate, score, state_texts  # noqa: E402
 
 SIZES = (20, 100, 400)

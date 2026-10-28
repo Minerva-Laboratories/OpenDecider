@@ -79,11 +79,11 @@ class Backbone(nn.Module):
         self.supports_shared_prefix = True
         # which shared-prefix attention the rows use: prefix_attn (Qwen3.5 attention) or the absorbed MLA one
         self.shared_prefix_kind = "mercurius" if cfg.weight_quant == "mercurius" else "qwen"
-        # state passes skip the work above a cut layer (terrace.SkipMaps; RESULTS 21): opt-in, OPENDECIDER_SKIPKV=<maps>;
-        # needs the optional `terrace` package (pip install opendecider[terrace])
+        # state passes skip the work above a cut layer (depthskip.SkipMaps; RESULTS 21): opt-in, OPENDECIDER_SKIPKV=<maps>;
+        # needs the optional `depthskip` package (pip install opendecider[depthskip])
         self.skip_state = None
         if os.environ.get("OPENDECIDER_SKIPKV"):
-            from terrace import SkipMaps
+            from depthskip import SkipMaps
             self.skip_state = SkipMaps.load(os.environ["OPENDECIDER_SKIPKV"], cfg.device)
 
     # ------------------------------------------------------------------ construction
@@ -314,7 +314,7 @@ class Backbone(nn.Module):
         C = self.cfg.prefill_chunk or ids.shape[1]
         sk = getattr(self, "skip_state", None)
         if sk is not None and not keep_hidden and not torch.is_grad_enabled():
-            from terrace import skipping            # upper layers write only their cache (the features are not used)
+            from depthskip import skipping            # upper layers write only their cache (the features are not used)
             past0 = cache.get_seq_length() if cache is not None else 0
             R = min(getattr(sk, "tail", 0), ids.shape[1] - 1)
             head = ids.shape[1] - R

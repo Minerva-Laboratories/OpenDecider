@@ -2,7 +2,7 @@
 
 A full ODIR matrix over a 248k-token vocabulary is not possible; over the arm's own top-k candidates, sorted, it is
 class-agnostic in tokens: a k x k matrix plus intercepts on the sorted log-probs, which can reorder close candidates.
-Data: Terrace's experiments/lm.py --dump-topk k (per arm and teacher-forced position: the arm's top-k ids and log-probs, the
+Data: DepthSkip's experiments/lm.py --dump-topk k (per arm and teacher-forced position: the arm's top-k ids and log-probs, the
 exact model's log-probs of those ids, the exact argmax, the gold next token). Fitted on the first 2/3 of documents
 toward the exact model's distribution over those candidates; reported on the rest: top-1 agreement with the exact
 argmax, gold-token accuracy among the candidates, KL to the exact candidate distribution. Calibrators: identity,

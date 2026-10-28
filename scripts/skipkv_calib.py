@@ -1,5 +1,5 @@
 """Can calibration on the option logits undo the skipped prompt pass on multiple-choice tasks?
-Reads the per-arm option logits saved by Terrace's experiments/tasks.py (*_logits.npz). For each arm other than exact
+Reads the per-arm option logits saved by DepthSkip's experiments/tasks.py (*_logits.npz). For each arm other than exact
 (floor, cut C), calibrators are fitted on half the items and applied to the other half (2-fold, both halves used), toward
 two targets: the exact arm's option distribution (undo the skip) and the gold label (task accuracy).
 Calibrators: identity; the class-agnostic ones of opendecider.calibrators (temperature, beta, ets, iso_shrunk) and its

@@ -1536,7 +1536,7 @@ still need their K/V, or k/v/a/b projections, conv and recurrence; they skip q, 
 
 ### 21.1 The skipped state pass for real (cut 16, 9B)
 
-`terrace.maps` (Terrace; formerly `src/opendecider/skipkv.py`): during state passes, every layer from the cut up is
+`depthskip.maps` (DepthSkip; formerly `src/opendecider/skipkv.py`): during state passes, every layer from the cut up is
 replaced by a cache-only layer that writes its cache from the predicted input and runs nothing else for state tokens:
 k_proj, v_proj, k_norm and RoPE in the full-attention layers (no queries, attention or output projection),
 in_proj_qkv / a / b, conv and the delta-rule state in the DeltaNet layers (no z, gated norm or output projection), no
@@ -1561,10 +1561,10 @@ folded into them). `scripts/skipkv_serve.py`, serving path (load_decider), Jetso
   accuracy within noise. The maps cost 0.5 GB (16 x 4096^2 bf16).
 - Normed maps are the default (equal speed, slightly closer to exact, foldable).
 
-### 21.2-21.4 The skip as a general prompt-pass method: moved to Terrace (2026-10-12 to 2026-10-17)
+### 21.2-21.4 The skip as a general prompt-pass method: moved to DepthSkip (2026-10-12 to 2026-10-17)
 
 The skip itself (maps, cache-only layers, graded per-token depth, part skips) and its LLM-side measurements now live
-in **Terrace**, a separate package that this repo imports for `OPENDECIDER_SKIPKV` (`pip install opendecider[terrace]`).
+in **DepthSkip**, a separate package that this repo imports for `OPENDECIDER_SKIPKV` (`pip install opendecider[depthskip]`).
 Its README holds the tables, scripts (`experiments/`) and raw results; the runs used this repo's checkpoints as
 backbones (`--ckpt`). Headline numbers (Mercurius-1-4B / the 9B; KL(exact || skipped) of the next-token distribution
 on FineWeb-Edu continuations; OpenBookQA / CommonsenseQA accuracy, lettered, chat template):
@@ -1589,7 +1589,7 @@ on FineWeb-Edu continuations; OpenBookQA / CommonsenseQA accuracy, lettered, cha
 - Decisions on Mercurius-1-4B (`scripts/skipkv_serve.py`, its trained decision head): cut 24 gives 97.6% / 100% /
   99.1% the same answers on typed decisions / Banking77 / injections, accuracy unchanged, state pass 1.18x faster at
   15k tokens; cut 16 94.4% / 100% / 99.1%, 1.46x faster. As on the 9B (21.1), decisions tolerate the skip.
-- Calibration (`scripts/skipkv_calib.py`, `scripts/skipkv_rankcal.py`, on Terrace's saved logits): option-logit
+- Calibration (`scripts/skipkv_calib.py`, `scripts/skipkv_rankcal.py`, on DepthSkip's saved logits): option-logit
   vector scaling or ODIR halves cut 24's extra multiple-choice answer changes (CommonsenseQA 12.7% -> 6.3%, floor
   4.3%); ODIR over the top-16 next-token candidates changes nothing in free generation, and no temperature helps.
 
