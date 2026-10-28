@@ -1575,14 +1575,16 @@ on FineWeb-Edu continuations; OpenBookQA / CommonsenseQA accuracy, lettered, cha
 | cut 24 | 0.0084 | 0.813 / 0.773 | 0.0058 | 0.900 / 0.820 | 17.2 / 37.7 s |
 | cut 16 | 0.085 | 0.403 / 0.283 | 0.094 | 0.315 / 0.200 | 13.0 / 28.3 s |
 | cut 16 + exact last 32 tokens (second call) | 0.068 | 0.710 / 0.630 | 0.075 | 0.835 / 0.775 | 14.0 / 29.4 s |
-| g512: last 32 all layers, 480 cut 24, rest cut 16 (one pass) | 0.023 | 0.800 / 0.717 | 0.024 | 0.890 / 0.815 | 15.0 / – s |
+| g512: last 32 all layers, 480 cut 24, rest cut 16 (three segment calls) | 0.023 | 0.800 / 0.717 | 0.024 | 0.890 / 0.815 | 15.0 / – s |
 | attention-only skip from 16 (+ last 32 exact) | 0.0047 (0.0050) | 0.807 / 0.743 | 0.0025 (0.0021) | 0.840 / 0.780 (0.890 / 0.815) | 20.6 / 44.4 s |
 
 - Cut 24 stays within the model's own rounding noise for generation (4B floor KL 0.0040) and loses no task accuracy;
   plain cut 16 is for decisions only (21, 21.1), not for generation or lettered multiple choice.
 - The few full-attention layers' predicted caches carry most of the error, on stock attention and MLA alike; the most
-  recent prompt tokens matter most, so graded depth (g512) recovers exact accuracy in one pass, about 1.4x faster than
-  exact at 15k on the 9B. Error-score token selection does not beat recency.
+  recent prompt tokens matter most, so graded depth (g512) recovers exact accuracy, about 1.4x faster than exact at
+  15k on the 9B. It is not one pass: each depth segment is a separate call (three for g512), so on short prompts the
+  per-call cost dominates and g512 is slower than exact (1k tokens: 0.74x / 0.73x on the 4B / 9B, DepthSkip
+  `results/firstn_{4b,9b}.json`). Error-score token selection does not beat recency.
 - Scaling (serving kernels): the 9B prompt pass at 131k tokens is 1.31x (cut 24) / 1.86x (cut 16) faster than exact
   (546 s). The exact tail costs about one decode step (the DeltaNet layers' per-call cost), which graded depth avoids.
 - Memory: unchanged (every layer keeps its cache); the maps add 0.25 / 0.50 GB on the 9B (cut 24 / 16).
